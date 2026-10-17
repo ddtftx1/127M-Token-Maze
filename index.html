@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <!-- 移动端优先：禁止缩放、支持刘海屏安全区 -->
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="theme-color" content="#05070c" />
+  <meta name="description" content="3D迷宫探险 —— 纯前端 Web 3D 第一人称迷宫游戏（Three.js）" />
+  <title>3D迷宫探险</title>
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+<div id="app">
+
+  <!-- ================= 3D 画布 ================= -->
+  <canvas id="game-canvas"></canvas>
+
+  <!-- ================= 视角触控层（位于画布之上、HUD 之下） ================= -->
+  <div id="look-layer"></div>
+
+  <!-- ================= 加载界面 ================= -->
+  <div id="loading-screen" class="screen hidden">
+    <div class="panel panel-narrow">
+      <h2 class="panel-title">正在生成迷宫…</h2>
+      <div class="loading-bar"><div id="loading-bar-fill" class="loading-bar-fill"></div></div>
+      <p id="loading-tip" class="muted">初始化 3D 场景</p>
+    </div>
+  </div>
+
+  <!-- ================= 主菜单 ================= -->
+  <div id="main-menu" class="screen">
+    <div class="panel menu-panel">
+      <h1 class="game-title">3D迷宫探险</h1>
+      <p class="subtitle">第一人称 3D 迷宫 · 自动寻路 · 每日挑战</p>
+
+      <!-- 难度选择 -->
+      <div class="section-label">选择难度</div>
+      <div class="diff-list" id="diff-list">
+        <button class="diff-card selected" data-diff="simple">
+          <span class="diff-name">简单</span>
+          <span class="diff-desc">迷宫较小，视野好，自动寻路不受距离限制，适合新手。</span>
+        </button>
+        <button class="diff-card" data-diff="medium">
+          <span class="diff-name">中等</span>
+          <span class="diff-desc">迷宫中等，有轻微迷雾，自动寻路单次限 25 格。</span>
+        </button>
+        <button class="diff-card" data-diff="hard">
+          <span class="diff-name">困难</span>
+          <span class="diff-desc">迷宫较大，迷雾较浓，自动寻路单次限 20 格，终点更远。</span>
+        </button>
+      </div>
+
+      <!-- 随机种子 -->
+      <div class="section-label">迷宫种子（可留空随机）</div>
+      <div class="seed-row">
+        <input id="seed-input" class="text-input" type="text" placeholder="例如：hello-world" maxlength="24" />
+        <button id="btn-seed-random" class="mini-btn" title="随机种子">随机</button>
+        <button id="btn-seed-copy" class="mini-btn" title="复制种子">复制</button>
+      </div>
+      <button id="btn-daily" class="mini-btn wide">📅 每日挑战（世界同步种子）</button>
+
+      <!-- 最佳记录 -->
+      <div class="section-label">最佳记录</div>
+      <ul id="best-records" class="record-list"></ul>
+
+      <!-- 主按钮 -->
+      <div class="btn-row">
+        <button id="btn-start" class="primary-btn">开始游戏</button>
+        <button id="btn-settings-menu" class="secondary-btn">设置</button>
+      </div>
+      <button id="btn-ranking-menu" class="mini-btn wide">🏆 本地排行榜</button>
+      <button id="btn-shop" class="mini-btn wide">🏪 商店</button>
+
+      <!-- 成就 -->
+      <details class="achievements">
+        <summary>🏆 成就</summary>
+        <ul id="achievements-list" class="record-list"></ul>
+      </details>
+
+      <p class="hint-text">
+        手机：左下摇杆移动，空白处滑动转视角。<br />
+        电脑：WASD / 方向键移动，鼠标转视角（点击锁定指针），R 重开，M 小地图，P 暂停，F 道具面板。
+      </p>
+    </div>
+  </div>
+
+  <!-- ================= 游戏内 HUD ================= -->
+  <div id="hud" class="hidden">
+    <!-- 顶部状态栏 -->
+    <div class="hud-top">
+      <div class="hud-stats">
+        <div class="stat"><span class="stat-label">时间</span><span id="stat-time" class="stat-value">0.0s</span></div>
+        <div class="stat"><span class="stat-label">步数</span><span id="stat-steps" class="stat-value">0</span></div>
+        <div class="stat"><span class="stat-label">难度</span><span id="stat-diff" class="stat-value">简单</span></div>
+        <div class="stat" id="stat-dist-wrap"><span class="stat-label">距离</span><span id="stat-dist" class="stat-value">0</span></div>
+        <div class="stat"><span class="stat-label">本局金币</span><span id="stat-coins" class="stat-value">0</span></div>
+        <div class="stat"><span class="stat-label">余额</span><span id="stat-wallet" class="stat-value">0 💰</span></div>
+      </div>
+      <div class="hud-buttons">
+        <button id="btn-minimap" class="icon-btn" title="小地图 (M)">🗺</button>
+        <button id="btn-fullscreen" class="icon-btn" title="全屏">⛶</button>
+        <button id="btn-settings-hud" class="icon-btn" title="设置">⚙</button>
+        <button id="btn-pause" class="icon-btn" title="暂停 (P)">⏸</button>
+      </div>
+    </div>
+
+    <!-- 右侧：指南针 + 小地图 -->
+    <div class="hud-right">
+      <div class="compass">
+        <div class="compass-ring"><div id="compass-arrow" class="compass-arrow">▲</div></div>
+        <div id="compass-dist" class="compass-dist">0</div>
+      </div>
+      <div class="minimap-wrap">
+        <canvas id="minimap" width="200" height="200"></canvas>
+        <div id="minimap-lock" class="minimap-lock">
+          <div class="minimap-lock-icon">🗺️</div>
+          <div class="minimap-lock-text">未找到地图</div>
+          <div id="minimap-lock-hint" class="minimap-lock-hint hidden"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 左下：虚拟摇杆 -->
+    <div id="joystick" class="joystick">
+      <div class="joystick-base"></div>
+      <div id="joystick-knob" class="joystick-knob"></div>
+    </div>
+
+    <!-- 右下：动作按钮 -->
+    <div class="hud-bottom-right">
+      <button id="btn-items" class="action-btn">🎒 道具</button>
+      <button id="btn-cancel-path" class="action-btn danger hidden">取消寻路</button>
+    </div>
+
+  </div>
+
+  <!-- 消息提示（全局层：菜单 / HUD / 面板内均可显示） -->
+  <div id="toast" class="toast"></div>
+
+  <!-- ================= 暂停菜单 ================= -->
+  <div id="pause-menu" class="screen hidden">
+    <div class="panel panel-narrow">
+      <h2 class="panel-title">暂停</h2>
+      <div class="menu-vertical">
+        <button id="btn-resume" class="primary-btn">继续游戏</button>
+        <button id="btn-restart" class="secondary-btn">重新开始</button>
+        <button id="btn-settings-pause" class="secondary-btn">设置</button>
+        <button id="btn-menu" class="secondary-btn">返回主菜单</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= 设置面板 ================= -->
+  <div id="settings-panel" class="screen hidden">
+    <div class="panel settings-panel">
+      <h2 class="panel-title">设置</h2>
+      <div class="settings-scroll">
+
+        <div class="setting-group">
+          <div class="setting-group-title">视角</div>
+          <div class="setting-row">
+            <label for="set-fov">视场角 FOV <span id="val-fov" class="val">75</span></label>
+            <input id="set-fov" class="slider" type="range" min="60" max="110" step="1" value="75" />
+          </div>
+          <div class="setting-row">
+            <label for="set-sensitivity">视角灵敏度 <span id="val-sensitivity" class="val">1.0</span></label>
+            <input id="set-sensitivity" class="slider" type="range" min="0.2" max="3" step="0.1" value="1" />
+          </div>
+          <div class="setting-row switch-row">
+            <label for="set-invert-yaw">水平滑动视角翻转</label>
+            <input id="set-invert-yaw" class="switch" type="checkbox" />
+          </div>
+          <div class="setting-row switch-row">
+            <label for="set-invert-pitch">垂直滑动视角翻转</label>
+            <input id="set-invert-pitch" class="switch" type="checkbox" />
+          </div>
+        </div>
+
+        <div class="setting-group">
+          <div class="setting-group-title">移动与画面</div>
+          <div class="setting-row">
+            <label for="set-speed">移动速度 <span id="val-speed" class="val">1.0</span></label>
+            <input id="set-speed" class="slider" type="range" min="0.5" max="2" step="0.1" value="1" />
+          </div>
+          <div class="setting-row switch-row">
+            <label for="set-quality-select">画质</label>
+            <select id="set-quality-select" class="select-input">
+              <option value="low">低</option>
+              <option value="mid">中</option>
+              <option value="high">高</option>
+            </select>
+          </div>
+          <div class="setting-row switch-row">
+            <label for="set-shadows">阴影</label>
+            <input id="set-shadows" class="switch" type="checkbox" />
+          </div>
+          <div class="setting-row switch-row">
+            <label for="set-fog">雾效</label>
+            <input id="set-fog" class="switch" type="checkbox" />
+          </div>
+          <div class="setting-row switch-row">
+            <label for="set-minimap-toggle">小地图 <span id="set-minimap-state" class="setting-lock hidden">未解锁</span></label>
+            <input id="set-minimap-toggle" class="switch" type="checkbox" />
+          </div>
+          <div class="setting-row switch-row">
+            <label for="set-theme-select">主题</label>
+            <select id="set-theme-select" class="select-input">
+              <option value="tech">科技</option>
+              <option value="dungeon">地牢</option>
+              <option value="forest">森林</option>
+            </select>
+          </div>
+          <div class="setting-row switch-row">
+            <label for="set-colorblind">色盲友好模式</label>
+            <input id="set-colorblind" class="switch" type="checkbox" />
+          </div>
+        </div>
+
+        <div class="setting-group">
+          <div class="setting-group-title">玩法</div>
+          <div class="setting-row switch-row">
+            <label for="set-ghost-select">幽灵对手</label>
+            <select id="set-ghost-select" class="select-input">
+              <option value="ask">每次询问</option>
+              <option value="always">总是启用</option>
+              <option value="never">从不启用</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="setting-group">
+          <div class="setting-group-title">声音</div>
+          <div class="setting-row">
+            <label for="set-volume">音量 <span id="val-volume" class="val">0.6</span></label>
+            <input id="set-volume" class="slider" type="range" min="0" max="1" step="0.05" value="0.6" />
+          </div>
+          <div class="setting-row switch-row">
+            <label for="set-sfx">音效开关</label>
+            <input id="set-sfx" class="switch" type="checkbox" />
+          </div>
+        </div>
+
+      </div>
+      <div class="btn-row">
+        <button id="btn-settings-reset" class="secondary-btn">重置设置</button>
+        <button id="btn-settings-back" class="primary-btn">返回</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= 胜利界面 ================= -->
+  <div id="win-screen" class="screen hidden">
+    <div class="panel panel-narrow win-panel">
+      <h2 class="win-title">🎉 恭喜到达终点！</h2>
+      <div id="win-newrecord" class="new-record hidden">新纪录！</div>
+      <ul class="win-stats">
+        <li><span>用时</span><b id="win-time">-</b></li>
+        <li><span>步数</span><b id="win-steps">-</b></li>
+        <li><span>难度</span><b id="win-diff">-</b></li>
+        <li><span>自动寻路</span><b id="win-autopath">-</b></li>
+        <li><span>金币入账</span><b id="win-coins">-</b></li>
+        <li><span>最佳记录</span><b id="win-best">-</b></li>
+      </ul>
+      <div id="win-ranking" class="win-ranking hidden">🏅 进入排行榜</div>
+      <div class="btn-row">
+        <button id="btn-play-again" class="primary-btn">再玩一次</button>
+        <button id="btn-win-menu" class="secondary-btn">返回主菜单</button>
+      </div>
+      <button id="btn-replay-win" class="mini-btn wide hidden">▶ 回放本局</button>
+    </div>
+  </div>
+
+  <!-- ================= 本地排行榜 ================= -->
+  <div id="ranking-screen" class="screen hidden">
+    <div class="panel panel-narrow">
+      <h2 class="panel-title">🏆 本地排行榜</h2>
+      <div id="ranking-tabs" class="ranking-tabs">
+        <button class="ranking-tab selected" data-diff="simple">简单</button>
+        <button class="ranking-tab" data-diff="medium">中等</button>
+        <button class="ranking-tab" data-diff="hard">困难</button>
+      </div>
+      <ul id="ranking-list" class="ranking-list record-list"></ul>
+      <div class="btn-row">
+        <button id="btn-ranking-clear" class="secondary-btn">清空本难度</button>
+        <button id="btn-ranking-back" class="primary-btn">返回</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= 商店 ================= -->
+  <div id="shop-screen" class="screen hidden">
+    <div class="panel shop-panel">
+      <h2 id="shop-title" class="panel-title">🏪 商店</h2>
+      <div class="shop-balance">💰 金币余额：<b id="shop-coins">0</b></div>
+      <div id="shop-list" class="shop-list"></div>
+      <div class="btn-row">
+        <button id="btn-shop-back" class="primary-btn">返回</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= 道具面板 ================= -->
+  <div id="item-panel" class="screen hidden">
+    <div class="panel panel-narrow item-panel">
+      <h2 class="panel-title">🎒 道具</h2>
+      <ul id="item-list" class="item-list"></ul>
+      <p class="muted item-panel-hint">
+        点击「使用」消耗一次；面板打开时游戏暂停。<br />
+        点击面板外或按 ESC 关闭。
+      </p>
+    </div>
+  </div>
+
+  <!-- ================= 幽灵询问弹窗 ================= -->
+  <div id="ghost-modal" class="screen hidden">
+    <div class="panel panel-narrow ghost-panel">
+      <h2 class="panel-title">👻 发现你的历史挑战</h2>
+      <p id="ghost-modal-info" class="ghost-info"></p>
+      <p class="muted ghost-msg">
+        上次你走完了这个种子。<br />
+        要不要召唤幽灵，和它比一比？
+      </p>
+      <label class="ghost-remember-row">
+        <input id="ghost-remember" type="checkbox" />
+        <span>记住我的选择</span>
+      </label>
+      <div class="btn-row">
+        <button id="btn-ghost-yes" class="primary-btn">幽灵对战</button>
+        <button id="btn-ghost-no" class="secondary-btn">独自探险</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= 隐藏彩蛋（长按商店按钮触发） ================= -->
+  <div id="secret-modal" class="screen hidden">
+    <div class="panel panel-narrow secret-panel">
+      <h2 class="panel-title">🤫 隐藏彩蛋</h2>
+      <p class="secret-question">本游戏的AI制作者是谁？</p>
+      <p class="muted secret-note">答对奖励 99 金币 · 答案区分大小写</p>
+      <input id="secret-input" class="text-input secret-input" type="text" placeholder="输入答案…"
+             maxlength="32" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" />
+      <div class="btn-row">
+        <button id="btn-secret-ok" class="primary-btn">确认</button>
+        <button id="btn-secret-cancel" class="secondary-btn">取消</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= 回放控制条 ================= -->
+  <div id="replay-bar" class="replay-bar hidden">
+    <button id="btn-replay-exit" class="mini-btn">✖ 退出</button>
+    <span id="replay-time" class="replay-time">0.0s / 0.0s</span>
+    <button id="btn-replay-pause" class="mini-btn">⏸ 暂停</button>
+    <button id="btn-replay-view" class="mini-btn">🎥 跟随</button>
+  </div>
+
+</div>
+
+<!-- ================= 脚本（按依赖顺序加载） ================= -->
+<!-- Three.js r160 UMD 本地版：支持 file:// 直接打开；若需 ES Module 版见 assets/three.module.js -->
+<script src="assets/three.min.js"></script>
+<script src="js/settings.js"></script>
+<script src="js/audio.js"></script>
+<script src="js/maze.js"></script>
+<script src="js/pathfinding.js"></script>
+<script src="js/player.js"></script>
+<script src="js/input.js"></script>
+<script src="js/ranking.js"></script>
+<script src="js/shop.js"></script>
+<script src="js/replay.js"></script>
+<script src="js/ui.js"></script>
+<script src="js/main.js"></script>
+</body>
+</html>

@@ -45,3 +45,4 @@
   │  ▲
   ▼  │ (代码渲染与测试)
 [3D 迷宫游戏]
+Test push from Termux

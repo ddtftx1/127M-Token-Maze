@@ -243,13 +243,13 @@
     var start = { x: 1, y: 1 };
     var end = { x: size - 2, y: size - 2 };
 
-    if (farCell) {
-      // 在通路格中挑离起点最远的（曼哈顿距离）
-      // 原条件 x + y > size - 2 在极小迷宫（cells=5 → size=11）下永远无候选，
-      // 改为 x + y > size * 0.5：既保证终点偏向后半区，又不会在小迷宫退化
-      var best = null, bestD = -1;
-      var halfSum = size * 0.5;
-      for (var y = 1; y < size - 1; y += 2) {
+if (farCell) {
+  // 在通路格中挑离起点最远的（曼哈顿距离）
+  // 约束 x + y > size * 0.5：只在"偏后半区"的通路格里挑，避免终点落在起点附近；
+  // 用 size 的一半而不是更严格的值，保证小迷宫（cells=5 → size=11）里也有足够的候选格。
+  var best = null, bestD = -1;
+  var halfSum = size * 0.5;
+        for (var y = 1; y < size - 1; y += 2) {
         for (var x = 1; x < size - 1; x += 2) {
           if (maze.grid[y * size + x] !== 0) continue;
           var d = Math.abs(x - start.x) + Math.abs(y - start.y);

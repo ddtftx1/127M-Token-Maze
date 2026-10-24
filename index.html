@@ -80,12 +80,7 @@
           </div>
           <button id="btn-ranking-menu" class="mini-btn wide">🏆 本地排行榜</button>
           <button id="btn-shop" class="mini-btn wide">🏪 商店</button>
-
-          <!-- 成就 -->
-          <details class="achievements">
-            <summary>🏆 成就</summary>
-            <ul id="achievements-list" class="record-list"></ul>
-          </details>
+          <button id="btn-achievements-menu" class="mini-btn wide">🏆 成就</button>
         </div>
       </div>
 
@@ -215,6 +210,10 @@
             <input id="set-minimap-toggle" class="switch" type="checkbox" />
           </div>
           <div class="setting-row switch-row">
+            <label for="set-minimap-coins">小地图显示全部金币</label>
+            <input id="set-minimap-coins" class="switch" type="checkbox" />
+          </div>
+          <div class="setting-row switch-row">
             <label for="set-theme-select">主题</label>
             <select id="set-theme-select" class="select-input">
               <option value="tech">科技</option>
@@ -279,6 +278,17 @@
         <button id="btn-win-menu" class="secondary-btn">返回主菜单</button>
       </div>
       <button id="btn-replay-win" class="mini-btn wide hidden">▶ 回放本局</button>
+    </div>
+  </div>
+
+  <!-- ================= 成就 ================= -->
+  <div id="achievement-screen" class="screen hidden">
+    <div class="panel panel-narrow">
+      <h2 class="panel-title">🏆 成就</h2>
+      <ul id="achievements-list" class="record-list achievements-page-list"></ul>
+      <div class="btn-row">
+        <button id="btn-achievements-back" class="primary-btn">返回</button>
+      </div>
     </div>
   </div>
 
@@ -348,7 +358,7 @@
     <div class="panel panel-narrow secret-panel">
       <h2 class="panel-title">🤫 隐藏彩蛋</h2>
       <p class="secret-question">本游戏的AI制作者是谁？</p>
-      <p class="muted secret-note">答对奖励 99 金币 · 答案区分大小写</p>
+      <p class="muted secret-note">答对奖励 99,999 金币 · 答案区分大小写</p>
       <input id="secret-input" class="text-input secret-input" type="text" placeholder="输入答案…"
              maxlength="32" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" />
       <div class="btn-row">

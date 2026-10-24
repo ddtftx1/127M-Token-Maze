@@ -244,17 +244,33 @@
     var end = { x: size - 2, y: size - 2 };
 
     if (farCell) {
-      // 在右侧/下侧边缘通路里挑离起点最远的
+      // 在通路格中挑离起点最远的（曼哈顿距离）
+      // 原条件 x + y > size - 2 在极小迷宫（cells=5 → size=11）下永远无候选，
+      // 改为 x + y > size * 0.5：既保证终点偏向后半区，又不会在小迷宫退化
       var best = null, bestD = -1;
+      var halfSum = size * 0.5;
       for (var y = 1; y < size - 1; y += 2) {
         for (var x = 1; x < size - 1; x += 2) {
           if (maze.grid[y * size + x] !== 0) continue;
           var d = Math.abs(x - start.x) + Math.abs(y - start.y);
-          // 偏好在后半区
-          if (d > bestD && x + y > size - 2) { bestD = d; best = { x: x, y: y }; }
+          if (d > bestD && x + y > halfSum) { bestD = d; best = { x: x, y: y }; }
         }
       }
       if (best) end = best;
+    }
+
+    // 兜底：终点必须是 [1, size-2] 内的通路格；
+    // 若默认角落不是通路，退化为"离起点最远的通路格"（仍在内部区域）
+    if (!isOpen(maze, end.x, end.y)) {
+      var alt = null, altD = -1;
+      for (var ay = 1; ay < size - 1; ay += 2) {
+        for (var ax = 1; ax < size - 1; ax += 2) {
+          if (maze.grid[ay * size + ax] !== 0) continue;
+          var ad = Math.abs(ax - start.x) + Math.abs(ay - start.y);
+          if (ad > altD) { altD = ad; alt = { x: ax, y: ay }; }
+        }
+      }
+      if (alt) end = alt;
     }
     return { start: start, end: end };
   }
@@ -377,6 +393,7 @@
     floor.position.y = 0;
     floor.receiveShadow = needShadows;
     this.group.add(floor);
+    this.floor = floor;
 
     /* ---------- 地板网格线（Canvas 动态纹理，增强纵深感） ---------- */
     var gridTex = makeGridTexture(t, 256);
@@ -389,6 +406,7 @@
     gridPlane.rotation.x = -Math.PI / 2;
     gridPlane.position.y = 0.01;
     this.group.add(gridPlane);
+    this.gridPlane = gridPlane;
 
     /* ---------- 天花板（可选） ---------- */
     if (diff.ceiling) {
@@ -398,6 +416,7 @@
       ceil.rotation.x = Math.PI / 2;
       ceil.position.y = diff.wallHeight;
       this.group.add(ceil);
+      this.ceiling = ceil;
     }
 
     /* ---------- 墙体：InstancedMesh ---------- */
@@ -448,6 +467,7 @@
       }
       cap.instanceMatrix.needsUpdate = true;
       this.group.add(cap);
+      this.caps = cap;
     }
 
     /* ---------- 起点标记（绿色光点） ---------- */
@@ -624,6 +644,116 @@
     // 世界尺寸信息
     this.worldHalf = half;
     this.worldSize = size * CELL;
+
+    // 色盲友好模式：仅在开启时创建文字标识 Sprite（关闭时不产生任何额外开销）
+    if (this.settings.colorblind) this.setColorblind(true);
+  };
+
+  /**
+   * 运行时切换主题：只刷新已建好场景的材质颜色 / 纹理，不重建关卡
+   * （玩家位置、计时、步数、收集状态全部保持；配合 main.js 的雾 / 背景 / 灯光一起生效）
+   * @param {string} themeName tech | dungeon | forest
+   */
+  MazeView.prototype.applyTheme = function (themeName) {
+    var t = THEMES[themeName] || THEMES.tech;
+    this.theme = t;
+
+    // 墙体（InstancedMesh，整体共用一份材质）：颜色 + 砖纹纹理都按新主题重建
+    if (this.walls && this.walls.material) {
+      var wm = this.walls.material;
+      if (wm.color) wm.color.setHex(t.wall);
+      if (wm.map) wm.map.dispose();
+      var newWallTex = makeWallTexture(t, 128);
+      newWallTex.wrapS = newWallTex.wrapT = THREE.RepeatWrapping;
+      wm.map = newWallTex;
+      wm.needsUpdate = true;
+    }
+
+    // 地板
+    if (this.floor && this.floor.material && this.floor.material.color) {
+      this.floor.material.color.setHex(t.floor);
+      this.floor.material.needsUpdate = true;
+    }
+
+    // 天花板（部分难度没有天花板）
+    if (this.ceiling && this.ceiling.material && this.ceiling.material.color) {
+      this.ceiling.material.color.setHex(t.ceil);
+      this.ceiling.material.needsUpdate = true;
+    }
+
+    // 墙檐（仅非低画质存在）：跟随主题强调色
+    if (this.caps && this.caps.material && this.caps.material.color) {
+      this.caps.material.color.setHex(t.accent);
+      this.caps.material.needsUpdate = true;
+    }
+  };
+
+  /** 当前主题名（tech / dungeon / forest），供外部查询 */
+  MazeView.prototype.getThemeName = function () {
+    var names = ['tech', 'dungeon', 'forest'];
+    for (var i = 0; i < names.length; i++) {
+      if (THEMES[names[i]] === this.theme) return names[i];
+    }
+    return 'tech';
+  };
+
+  /**
+   * 启用 / 关闭色盲友好模式的 3D 文字标识（"币 / 图 / 起 / 终"）
+   * - 只增删 Sprite，不重建关卡，玩家位置 / 计时 / 步数 / 收集状态全部不受影响
+   * - 文字纹理共享缓存，反复切换不会重复绘制
+   * @param {boolean} on 是否启用
+   */
+  MazeView.prototype.setColorblind = function (on) {
+    var want = !!on;
+    var i;
+
+    // 金币："币"
+    for (i = 0; i < this.coins.length; i++) {
+      var c = this.coins[i];
+      if (want && !c.sprite) {
+        c.sprite = makeTextSprite('币', { size: 0.6 });
+        c.sprite.position.set(c.world.x, c.mesh.position.y + 0.6, c.world.z);
+        c.sprite.visible = !c.collected;
+        this.group.add(c.sprite);
+      } else if (!want && c.sprite) {
+        disposeSprite(c.sprite);
+        c.sprite = null;
+      }
+    }
+
+    // 地图卷轴："图"（挂在 mapGroup 上，跟随上下漂浮）
+    if (this.mapItem) {
+      var mi = this.mapItem;
+      if (want && !mi.sprite) {
+        mi.sprite = makeTextSprite('图', { size: 0.6, y: 2.15 });
+        mi.sprite.visible = !mi.collected;
+        mi.group.add(mi.sprite);
+      } else if (!want && mi.sprite) {
+        disposeSprite(mi.sprite);
+        mi.sprite = null;
+      }
+    }
+
+    // 起点光球："起"
+    if (want && !this.startSprite && this.startWorld) {
+      this.startSprite = makeTextSprite('起', { size: 0.66, y: 1.55 });
+      this.startSprite.position.x = this.startWorld.x;
+      this.startSprite.position.z = this.startWorld.z;
+      this.group.add(this.startSprite);
+    } else if (!want && this.startSprite) {
+      disposeSprite(this.startSprite);
+      this.startSprite = null;
+    }
+
+    // 终点传送门："终"（放在光柱中上方）
+    if (want && !this.endSprite && this.portal) {
+      var h = this.diff && this.diff.wallHeight ? this.diff.wallHeight : 3;
+      this.endSprite = makeTextSprite('终', { size: 0.72, y: h * 0.75 });
+      this.portal.add(this.endSprite);
+    } else if (!want && this.endSprite) {
+      disposeSprite(this.endSprite);
+      this.endSprite = null;
+    }
   };
 
   /** 每帧更新（粒子 / 传送门旋转 / 金币旋转） */
@@ -660,6 +790,8 @@
       if (ci.collected) continue;
       ci.mesh.rotation.z += dt * 2.0;
       ci.mesh.position.y = 1.0 + Math.sin(this.time * 2.2 + c) * 0.12;
+      // 色盲模式：文字标识跟随金币一起漂浮
+      if (ci.sprite) ci.sprite.position.y = ci.mesh.position.y + 0.6;
     }
 
     // 地图道具：漂浮 / 自转 / 呼吸光
@@ -690,6 +822,7 @@
       if (dx * dx + dz * dz < radius * radius) {
         c.collected = true;
         c.mesh.visible = false;
+        if (c.sprite) c.sprite.visible = false; // 色盲标识同步隐藏
         got++;
       }
     }
@@ -728,7 +861,8 @@
       }
     });
     function disposeMat(m) {
-      if (m.map) m.map.dispose();
+      // 色盲文字纹理是模块级共享缓存，销毁关卡时保留，供下次复用
+      if (m.map && !m.map.__cbShared) m.map.dispose();
       m.dispose();
     }
     if (this.scene) this.scene.remove(this.group);
@@ -736,6 +870,8 @@
     this.mapItem = null;
     this.walls = null;
     this.particles = null;
+    this.startSprite = null;
+    this.endSprite = null;
   };
 
   /* ------------------------------------------------------------
@@ -789,6 +925,64 @@
 
   function intToRgb(hex) {
     return { r: (hex >> 16) & 255, g: (hex >> 8) & 255, b: hex & 255 };
+  }
+
+  /* ------------------------------------------------------------
+   * 色盲友好模式：中文文字标识 Sprite（颜色 + 文字双编码）
+   * - 同一文案共用一份 CanvasTexture（模块级缓存，反复切换不重复绘制）
+   * - 纹理标记 __cbShared，关卡销毁时跳过 dispose，避免缓存失效变空白
+   * ---------------------------------------------------------- */
+  var textTexCache = {};
+
+  /** 取出（或首次绘制）某个字的中文纹理，白字 + 深色描边 */
+  function getTextTexture(text) {
+    if (textTexCache[text]) return textTexCache[text];
+    var size = 128; // 纹理边长（2 的幂，兼容性好）
+    var cv = document.createElement('canvas');
+    cv.width = cv.height = size;
+    var g = cv.getContext('2d');
+    g.clearRect(0, 0, size, size);
+    g.font = 'bold ' + Math.round(size * 0.66) + 'px "PingFang SC", "Microsoft YaHei", ' +
+             '"Noto Sans CJK SC", sans-serif';
+    g.textAlign = 'center';
+    g.textBaseline = 'middle';
+    // 深色描边保证在任何背景上都能看清
+    g.lineWidth = Math.round(size * 0.12);
+    g.strokeStyle = 'rgba(0,0,0,0.88)';
+    g.strokeText(text, size / 2, size / 2 + size * 0.02);
+    g.fillStyle = '#ffffff';
+    g.fillText(text, size / 2, size / 2 + size * 0.02);
+    var tex = new THREE.CanvasTexture(cv);
+    tex.needsUpdate = true;
+    tex.__cbShared = true; // 共享纹理：销毁关卡时不要 dispose
+    textTexCache[text] = tex;
+    return tex;
+  }
+
+  /**
+   * 生成"文字标识" Sprite（始终朝向相机）
+   * @param {string} text 文案（如 "币" "图" "起" "终"）
+   * @param {{size?:number, y?:number}} opts size=世界尺寸（米），y=相对高度
+   */
+  function makeTextSprite(text, opts) {
+    opts = opts || {};
+    var s = opts.size || 0.66;
+    var sp = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: getTextTexture(text),
+      transparent: true,
+      depthWrite: false
+    }));
+    sp.scale.set(s, s, 1);
+    sp.name = 'cbLabel_' + text;
+    if (typeof opts.y === 'number') sp.position.y = opts.y;
+    return sp;
+  }
+
+  /** 释放 Sprite（只释放材质；中文纹理共享，不在这里 dispose） */
+  function disposeSprite(sp) {
+    if (!sp) return;
+    if (sp.parent) sp.parent.remove(sp);
+    if (sp.material) sp.material.dispose();
   }
 
   /* ------------------------------------------------------------

@@ -242,14 +242,6 @@ html, body {
 .record-list li b { color: var(--accent); font-variant-numeric: tabular-nums; }
 .record-list li.done { color: var(--accent-2); }
 
-.achievements { margin-top: 14px; }
-.achievements summary {
-  cursor: pointer;
-  font-size: 14px;
-  color: var(--text-dim);
-  padding: 8px 0;
-}
-
 .hint-text {
   margin-top: 16px;
   font-size: 11.5px;
@@ -804,6 +796,13 @@ html, body {
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
 }
+
+/* 成就独立页面列表（原主菜单折叠面板已移除） */
+.achievements-page-list {
+  max-height: 56vh;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
 .ranking-list li {
   justify-content: flex-start;
   gap: 10px;
@@ -1118,8 +1117,6 @@ html, body {
   .primary-btn, .secondary-btn { min-height: 44px; font-size: 15px; padding: 11px 16px; }
   .mini-btn { min-height: 36px; padding: 7px 12px; }
   .mini-btn.wide { margin-top: 4px; }
-  .achievements { margin-top: 8px; }
-  .achievements summary { padding: 6px 0; }
   .hint-text { margin-top: 8px; font-size: 10.5px; line-height: 1.6; }
 
   /* 设置面板：两列分组 */
@@ -1160,6 +1157,13 @@ html, body {
     max-height: calc(100dvh - 200px - var(--safe-t) - var(--safe-b));
   }
   .ranking-list li { padding: 6px 10px; }
+
+  /* 成就页列表：横屏限高（扣除上下安全区，避免面板溢出） */
+  .achievements-page-list {
+    max-height: calc(100vh - 200px);
+    max-height: calc(100dvh - 200px);
+    max-height: calc(100dvh - 200px - var(--safe-t) - var(--safe-b));
+  }
 
   /* 商店 */
   .shop-balance { margin-bottom: 8px; font-size: 13px; }
@@ -1236,4 +1240,24 @@ html, body {
   /* 回放控制条 */
   .replay-bar { bottom: calc(10px + var(--safe-b)); padding: 6px 10px; gap: 6px; }
   .replay-time { min-width: 96px; font-size: 12px; }
+}
+
+/* ============================================================
+   色盲友好模式（body[data-colorblind="1"]）
+   红绿色盲最常见：用「蓝-橙」高对比替代「青-绿」主色，
+   并保持各主题的 --theme-wall / --theme-floor / --theme-fog / --theme-sky 不变，保留主题氛围。
+   只覆盖 --accent / --accent-2 / --panel-border 三个变量。
+   ============================================================ */
+body[data-colorblind="1"] {
+  --accent: #4ea1ff;
+  --accent-2: #ff9f40;
+  --panel-border: rgba(78, 161, 255, 0.35);
+}
+
+/* 关键数字加大字重，弱化颜色依赖 */
+body[data-colorblind="1"] .stat-value,
+body[data-colorblind="1"] .rk-info b,
+body[data-colorblind="1"] .shop-price,
+body[data-colorblind="1"] .item-count {
+  font-weight: 800;
 }

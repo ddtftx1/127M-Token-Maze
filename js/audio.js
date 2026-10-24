@@ -13,7 +13,7 @@
   var ctx = null;         // AudioContext
   var masterGain = null;  // 总音量节点
   var unlocked = false;   // 是否已解锁
-  var lastStepTime = 0;   // 脚步节流
+  var lastStepTimeMap = {}; // 脚步节流（按来源区分：player / ghost / …）
   var Settings = null;    // 设置引用（延迟获取）
 
   /** 惰性创建 AudioContext */
@@ -59,9 +59,31 @@
     var c = ensureContext();
     if (!c) return;
     if (c.state === 'suspended') {
-      c.resume().then(function () { unlocked = true; }).catch(function () {});
+      try {
+        var p = c.resume();
+        if (p && p.then) p.then(function () { unlocked = true; }).catch(function () {});
+      } catch (e) { /* 忽略 */ }
     } else {
       unlocked = true;
+    }
+  }
+
+  /**
+   * 首次用户手势自动解锁（一次性监听，多个事件都挂上，命中任意一个即可）
+   * - 部分浏览器要求 resume 必须在手势调用栈内，故在真实事件里再试一次
+   * - 只注册一次，不会重复创建 AudioContext
+   */
+  var unlockBound = false;
+  function bindAutoUnlock() {
+    if (unlockBound) return;
+    unlockBound = true;
+    var events = ['mousedown', 'touchstart', 'click', 'keydown'];
+    for (var i = 0; i < events.length; i++) {
+      try {
+        global.addEventListener(events[i], unlock, { once: true, passive: true });
+      } catch (e) {
+        try { global.addEventListener(events[i], unlock, false); } catch (e2) { /* 忽略 */ }
+      }
     }
   }
 
@@ -72,6 +94,13 @@
   function tone(opt) {
     var c = ensureContext();
     if (!c || currentVolume() <= 0) return;
+    // 上下文被浏览器挂起时兜底唤醒（不阻塞本次播放，唤醒后后续音效即可发声）
+    if (c.state === 'suspended') {
+      try {
+        var rp = c.resume();
+        if (rp && rp.catch) rp.catch(function () {});
+      } catch (e) { /* 忽略 */ }
+    }
     var t0 = c.currentTime + (opt.delay || 0);
     var dur = opt.dur || 0.12;
     var osc = c.createOscillator();
@@ -100,6 +129,13 @@
   function noise(opt) {
     var c = ensureContext();
     if (!c || currentVolume() <= 0) return;
+    // 上下文被挂起时兜底唤醒（不阻塞本次播放）
+    if (c.state === 'suspended') {
+      try {
+        var rp = c.resume();
+        if (rp && rp.catch) rp.catch(function () {});
+      } catch (e) { /* 忽略 */ }
+    }
     opt = opt || {};
     var dur = opt.dur || 0.08;
     var len = Math.max(1, Math.floor(c.sampleRate * dur));
@@ -135,12 +171,14 @@
     /** 按钮点击 */
     click: function () { tone({ freq: 620, freq2: 880, type: 'triangle', dur: 0.07, vol: 0.22 }); },
 
-    /** 脚步（带节流，按移动速度触发） */
-    step: function (fast) {
+    /** 脚步（带节流，按移动速度触发）；ownerKey 区分脚步来源（默认 'player'，未来幽灵可传 'ghost'） */
+    step: function (fast, ownerKey) {
       var now = performance.now();
       var interval = fast ? 260 : 380;
-      if (now - lastStepTime < interval) return;
-      lastStepTime = now;
+      var key = ownerKey || 'player';
+      var last = lastStepTimeMap[key] || 0;
+      if (now - last < interval) return;
+      lastStepTimeMap[key] = now;
       noise({ dur: 0.07, frequency: 620 + Math.random() * 200, vol: 0.10 });
     },
 
@@ -197,6 +235,9 @@
       tone({ freq: 180, freq2: 240, type: 'sine', dur: 0.9, vol: v });
     }
   };
+
+  // 首次用户手势自动解锁音频（脚本加载即绑定，才能捕获页面上的第一次点击 / 触摸 / 按键）
+  bindAutoUnlock();
 
   MG.Audio = API;
 

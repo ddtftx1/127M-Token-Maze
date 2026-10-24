@@ -15,14 +15,18 @@
 
   /** localStorage key 前缀 */
   var PREFIX = 'maze3d.replay.v1.';
-  /** 全局最多保留的回放条数（防止 localStorage 膨胀） */
-  var MAX_REPLAYS = 24;
+  /**
+   * 全局最多保留的回放条数（防止 localStorage 膨胀）
+   * 8 局 × 最长 9000 帧 × 约 30 字节 ≈ 2 MB，安全落在 5 MB 配额内
+   */
+  var MAX_REPLAYS = 8;
   /** 采样间隔（秒） */
   var SAMPLE_INTERVAL = 0.1;
-  /** 单局最大帧数保护（约 20 分钟） */
-  var MAX_FRAMES = 12000;
-  /** prune 节流计数：全量扫描 localStorage 开销大，每 5 次保存执行一次 */
-  var pruneTick = 0;
+  /**
+   * 单局最大帧数保护（9000 帧 × 0.1s ≈ 15 分钟）
+   * 原 12000 帧（20 分钟）配合 24 局会撑爆 localStorage 5MB 配额，故同时下调条数与单局帧数
+   */
+  var MAX_FRAMES = 9000;
 
   function safeGet(key) {
     try { return global.localStorage.getItem(key); } catch (e) { return null; }
@@ -84,7 +88,15 @@
       finish: function (x, z, yaw) {
         this.done = true;
         if (typeof x === 'number' && typeof z === 'number') {
-          this.frames.push(compressFrame(x, z, yaw || 0, this.time));
+          // 终点帧时间戳必须严格大于上一帧：
+          // 1) dt 极小时 this.time 可能与上一帧相同 → sample 二分定位会"粘住"上一帧姿态；
+          // 2) compressFrame 会把 t 舍入到 0.01s，故这里按 0.01 的步长保证严格递增
+          var tEnd = this.time;
+          if (this.frames.length) {
+            var prevT = this.frames[this.frames.length - 1][3];
+            if (tEnd <= prevT) tEnd = prevT + 0.01;
+          }
+          this.frames.push(compressFrame(x, z, yaw || 0, tEnd));
         }
         return this.frames;
       }
@@ -97,11 +109,13 @@
 
   /**
    * 保存一局回放
+   * - 写入前会修剪超出上限的旧回放；若仍因存储配额失败，会再修剪一次并重试
+   * - 可能因 localStorage 配额不足返回 false（此时已尽力腾空间并重试）
    * @param {string} diffKey 难度
    * @param {string} seed 种子
    * @param {Array} frames 帧序列
    * @param {Object} [meta] {time, steps, auto}
-   * @returns {boolean}
+   * @returns {boolean} 是否保存成功（false = 配额不足等）
    */
   function save(diffKey, seed, frames, meta) {
     if (!frames || frames.length < 2) return false;
@@ -117,11 +131,22 @@
       auto: !!meta.auto,
       frames: frames
     };
-    var ok = safeSet(makeKey(diffKey, seed), JSON.stringify(payload));
-    // 节流：每 5 次保存才全量扫描一次（prune 开销与 localStorage 规模相关）
+    var key = makeKey(diffKey, seed);
+    var json = JSON.stringify(payload);
+    // 写入前先修剪一次，尽量腾出配额空间
+    prune();
+    var ok = safeSet(key, json);
+    if (!ok) {
+      // 仍然失败（配额紧张）：再清一批最旧的，然后重试一次
+      prune();
+      ok = safeSet(key, json);
+    }
     if (ok) {
-      pruneTick++;
-      if (pruneTick % 5 === 0) prune();
+      // 每次保存成功后都收敛一次，保证回放键数量始终 ≤ MAX_REPLAYS
+      prune();
+    } else if (MG.UI && MG.UI.toast) {
+      // 加载顺序保护：UI 未就绪时静默（不影响游戏主流程）
+      MG.UI.toast('回放保存失败，请清理浏览器缓存', 3000);
     }
     return ok;
   }

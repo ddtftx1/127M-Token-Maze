@@ -44,12 +44,14 @@
       'settings-panel', 'set-fov', 'val-fov', 'set-sensitivity', 'val-sensitivity',
       'set-invert-yaw', 'set-invert-pitch', 'set-speed', 'val-speed',
       'set-quality-select', 'set-shadows', 'set-fog', 'set-minimap-toggle', 'set-minimap-state',
+      'set-minimap-coins',
       'set-theme-select', 'set-colorblind', 'set-volume', 'val-volume', 'set-sfx', 'set-ghost-select',
       'btn-settings-reset', 'btn-settings-back',
       'win-screen', 'win-newrecord', 'win-time', 'win-steps',
       'win-diff', 'win-autopath', 'win-coins', 'win-best', 'btn-play-again', 'btn-win-menu',
       'win-ranking', 'btn-replay-win',
       'ranking-screen', 'ranking-tabs', 'ranking-list', 'btn-ranking-clear', 'btn-ranking-back',
+      'achievement-screen', 'btn-achievements-menu', 'btn-achievements-back',
       'shop-screen', 'shop-coins', 'shop-list', 'btn-shop-back',
       'item-panel', 'item-list',
       'ghost-modal', 'ghost-modal-info', 'ghost-remember', 'btn-ghost-yes', 'btn-ghost-no',
@@ -60,10 +62,16 @@
       el[ids[i]] = document.getElementById(ids[i]);
     }
 
-    // 小地图
+    // 小地图：按设备像素比放大内部画布分辨率，避免高 DPR 屏幕上被拉伸发虚
+    // （绘制代码仍用逻辑像素坐标，由 ctx.setTransform 自动映射到物理像素）
     if (el['minimap']) {
-      mapSize = el['minimap'].width;
+      var dpr = Math.min(window.devicePixelRatio || 1, 2); // 上限 2，与 main.js 像素比策略一致
+      var cssW = el['minimap'].clientWidth || 168;         // 隐藏容器里 clientWidth 可能为 0，兜底
+      mapSize = Math.max(1, Math.round(cssW));             // 逻辑尺寸 = CSS 显示尺寸
+      el['minimap'].width = Math.round(mapSize * dpr);     // 内部分辨率 = 逻辑尺寸 × DPR
+      el['minimap'].height = Math.round(mapSize * dpr);
       mapCtx = el['minimap'].getContext('2d');
+      mapCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
     }
 
     clockEl = { t: 0 };
@@ -74,6 +82,7 @@
     bindPauseMenu();
     bindWinScreen();
     bindRankingScreen();
+    bindAchievementScreen();
     bindShop();
     bindItemPanel();
     bindGhostModal();
@@ -97,7 +106,7 @@
     if (node) node.classList.add('hidden');
   }
   function hideAllScreens() {
-    var screens = ['main-menu', 'loading-screen', 'pause-menu', 'settings-panel', 'win-screen', 'ranking-screen', 'shop-screen', 'item-panel', 'ghost-modal', 'secret-modal', 'replay-bar'];
+    var screens = ['main-menu', 'loading-screen', 'pause-menu', 'settings-panel', 'win-screen', 'ranking-screen', 'achievement-screen', 'shop-screen', 'item-panel', 'ghost-modal', 'secret-modal', 'replay-bar'];
     for (var i = 0; i < screens.length; i++) hide(screens[i]);
   }
 
@@ -269,6 +278,13 @@
         openRanking();
       });
     }
+    // 成就（独立页面，替代原来的主菜单折叠面板）
+    if (el['btn-achievements-menu']) {
+      el['btn-achievements-menu'].addEventListener('click', function () {
+        playClick();
+        openAchievements();
+      });
+    }
     // 注：商店按钮的绑定在 bindShop()（含"长按彩蛋"逻辑），此处不再重复绑定
   }
 
@@ -438,6 +454,27 @@
     hideAllScreens();
     show('ranking-screen');
     refreshRanking();
+  }
+
+  /* ------------------------------------------------------------
+   * 成就独立页面（原主菜单折叠面板已移除，避免横屏撑高右列）
+   * ---------------------------------------------------------- */
+  /** 打开成就页 */
+  function openAchievements() {
+    hideAllScreens();
+    show('achievement-screen');
+    refreshAchievements();
+  }
+
+  /** 绑定成就页返回按钮 */
+  function bindAchievementScreen() {
+    if (el['btn-achievements-back']) {
+      el['btn-achievements-back'].addEventListener('click', function () {
+        playClick();
+        hide('achievement-screen');
+        showMainMenu();
+      });
+    }
   }
 
   function refreshRanking() {
@@ -612,13 +649,13 @@
    * 隐藏彩蛋：长按"商店"按钮 / 商店界面标题 → 问答输入框（答案区分大小写）
    * - 短按商店：正常打开商店
    * - 长按约 0.5 秒：震动反馈并立即弹窗（无需等松开）
-   * - 答对"deepseek"奖励 99 金币；答对"AdroitHare8579"奖励全道具 +99
+   * - 答对"deepseek"奖励 99,999 金币；答对"AdroitHare8579"奖励全道具 +99,999
    *   （两份奖励均可重复获取、可累积；道具不做上限截断）
    * ---------------------------------------------------------- */
   /** 彩蛋答案表（区分大小写）：每个答案对应一份奖励（可重复获取） */
   var SECRET_ANSWERS = {
-    'deepseek': 'coins',        // 奖励①：+99 金币（可重复）
-    'AdroitHare8579': 'items'   // 奖励②：各道具 +99（可累积；金币收益仅按一次买断）
+    'deepseek': 'coins',        // 奖励①：+99,999 金币（可重复）
+    'AdroitHare8579': 'items'   // 奖励②：各道具 +99,999（可累积；金币收益仅按一次买断）
   };
   var SECRET_HOLD_MS = 480;     // 长按阈值：达到即弹窗（低于浏览器原生长按手势，避免被抢占）
   var secretAwaitRelease = false; // 弹窗打开后按压尚未结束（等"松开"来吞掉合成点击）
@@ -673,11 +710,11 @@
       if (rewardKey === 'coins') {
         MG.Shop.claimSecretGift();
         if (MG.Audio && S.get().sfx) MG.Audio.purchase();
-        toast('🎉 答对了！奖励 ' + (MG.Shop.SECRET_GIFT_COINS || 99) + ' 金币已到账');
+        toast('🎉 答对了！奖励 ' + formatNum(MG.Shop.SECRET_GIFT_COINS || 99999) + ' 金币已到账');
       } else if (rewardKey === 'items') {
         MG.Shop.claimSecretItemGift();
         if (MG.Audio && S.get().sfx) MG.Audio.purchase();
-        toast('🎉 答对了！所有道具 +' + (MG.Shop.SECRET_GIFT_ITEM_COUNT || 99) +
+        toast('🎉 答对了！所有道具 +' + formatNum(MG.Shop.SECRET_GIFT_ITEM_COUNT || 99999) +
           ' 已到账（可累积，金币收益为一次买断）');
       }
       closeSecretDialog();
@@ -863,6 +900,14 @@
    */
   function showGhostDialog(info) {
     return new Promise(function (resolve) {
+      // 上一次弹窗若仍未处理（resolve 尚未被调用），先按"独自探险"收尾并清理 DOM：
+      // 否则 ghostResolve 被覆盖后旧 Promise 永久挂起，且旧弹窗残留会与新弹窗叠加
+      if (ghostResolve) {
+        var prevResolve = ghostResolve;
+        ghostResolve = null;
+        hide('ghost-modal');
+        prevResolve({ choice: 'solo', remember: false });
+      }
       ghostResolve = resolve;
       if (el['ghost-modal-info']) {
         var t = (info && typeof info.time === 'number') ? formatTime(info.time) : '—';
@@ -880,7 +925,7 @@
     closeGhostDialog({ choice: choice, remember: remember });
   }
 
-  /** 取消弹窗（ESC / 点击背景 / 超时兜底）：按"独自探险"处理，确保主流程必定继续 */
+  /** 取消弹窗（点击背景遮罩 / 按 ESC 主动取消）：按"独自探险"处理，确保主流程必定继续 */
   function cancelGhostDialog() {
     closeGhostDialog({ choice: 'solo', remember: false });
   }
@@ -889,8 +934,8 @@
   function closeGhostDialog(result) {
     if (!ghostResolve) return;
     var fn = ghostResolve;
+    hide('ghost-modal');   // 先清理 DOM，再清空待决状态，最后回传结果
     ghostResolve = null;
-    hide('ghost-modal');
     fn(result);
   }
 
@@ -934,6 +979,8 @@
   function applyMinimapSettingLock() {
     var locked = currentMinimapLocked();
     if (el['set-minimap-toggle']) el['set-minimap-toggle'].disabled = locked;
+    // 「小地图显示全部金币」依赖小地图本身，未拾取地图卷轴时一并置灰
+    if (el['set-minimap-coins']) el['set-minimap-coins'].disabled = locked;
     if (el['set-minimap-state']) {
       if (locked) el['set-minimap-state'].classList.remove('hidden');
       else el['set-minimap-state'].classList.add('hidden');
@@ -956,6 +1003,7 @@
     bindSwitch('set-shadows', 'shadows');
     bindSwitch('set-fog', 'fog');
     bindSwitch('set-minimap-toggle', 'minimap');
+    bindSwitch('set-minimap-coins', 'minimapCoins');
     bindSwitch('set-colorblind', 'colorblind');
     bindSwitch('set-sfx', 'sfx');
 
@@ -1025,6 +1073,7 @@
     setCheck('set-shadows', s.shadows);
     setCheck('set-fog', s.fog);
     setCheck('set-minimap-toggle', s.minimap);
+    setCheck('set-minimap-coins', s.minimapCoins);
     setCheck('set-colorblind', s.colorblind);
     setCheck('set-sfx', s.sfx);
 
@@ -1144,6 +1193,7 @@
     if (!mapCtx || !settings.minimap) return;
     // 未找到地图道具前不绘制内容（占位由 updateMinimapLock 负责）
     if (MG.game && !MG.game.mapFound) return;
+    var cb = !!settings.colorblind; // 色盲友好模式：颜色 + 形状双编码
     var size = maze.size;
     var cellPx = mapSize / size;
 
@@ -1172,31 +1222,82 @@
       }
     }
 
-    // 金币（仅显示已探索区域的）
+    // 金币：默认只显示已探索区域的实心点；
+    // 开启「小地图显示全部金币」后，未探索区域的金币用半透明轮廓提示位置
+    // （轮廓 vs 实心，明确区分"知道位置"与"亲自探索过"）
+    var showAllCoins = !!(settings && settings.minimapCoins);
     if (mazeView && mazeView.coins) {
       for (var c = 0; c < mazeView.coins.length; c++) {
         var coin = mazeView.coins[c];
         if (coin.collected) continue;
-        if (!player.explored[coin.y * size + coin.x]) continue;
-        mapCtx.fillStyle = '#ffd24a';
-        mapCtx.beginPath();
-        mapCtx.arc(coin.x * cellPx + cellPx / 2, coin.y * cellPx + cellPx / 2, Math.max(2.2, cellPx * 0.3), 0, Math.PI * 2);
-        mapCtx.fill();
+        var coinSeen = !!player.explored[coin.y * size + coin.x];
+        if (!coinSeen && !showAllCoins) continue;
+        var coinCx = coin.x * cellPx + cellPx / 2;
+        var coinCy = coin.y * cellPx + cellPx / 2;
+        var coinR = Math.max(2.2, cellPx * 0.3);
+        if (coinSeen) {
+          if (cb) {
+            // 色盲：橙色方块（□），与圆形起点/三角玩家形状区分
+            mapCtx.fillStyle = '#ff9f40';
+            mapCtx.fillRect(coinCx - coinR, coinCy - coinR, coinR * 2, coinR * 2);
+          } else {
+            mapCtx.fillStyle = '#ffd24a';
+            mapCtx.beginPath();
+            mapCtx.arc(coinCx, coinCy, coinR, 0, Math.PI * 2);
+            mapCtx.fill();
+          }
+        } else {
+          // 未探索：只描轮廓不填充，视觉弱化
+          if (cb) {
+            mapCtx.strokeStyle = 'rgba(255,159,64,0.55)';
+            mapCtx.lineWidth = Math.max(1, cellPx * 0.16);
+            mapCtx.strokeRect(coinCx - coinR, coinCy - coinR, coinR * 2, coinR * 2);
+          } else {
+            mapCtx.strokeStyle = 'rgba(255,210,74,0.45)';
+            mapCtx.lineWidth = Math.max(1, cellPx * 0.16);
+            mapCtx.beginPath();
+            mapCtx.arc(coinCx, coinCy, coinR, 0, Math.PI * 2);
+            mapCtx.stroke();
+          }
+        }
       }
     }
 
     // 起点
-    mapCtx.fillStyle = '#44ff88';
-    mapCtx.beginPath();
-    mapCtx.arc(maze.start.x * cellPx + cellPx / 2, maze.start.y * cellPx + cellPx / 2, Math.max(2.5, cellPx * 0.35), 0, Math.PI * 2);
-    mapCtx.fill();
+    var startPx = maze.start.x * cellPx + cellPx / 2;
+    var startPy = maze.start.y * cellPx + cellPx / 2;
+    if (cb) {
+      // 色盲：蓝色实心方块（■）
+      var sr = Math.max(2.5, cellPx * 0.35);
+      mapCtx.fillStyle = '#4ea1ff';
+      mapCtx.fillRect(startPx - sr, startPy - sr, sr * 2, sr * 2);
+    } else {
+      mapCtx.fillStyle = '#44ff88';
+      mapCtx.beginPath();
+      mapCtx.arc(startPx, startPy, Math.max(2.5, cellPx * 0.35), 0, Math.PI * 2);
+      mapCtx.fill();
+    }
 
-    // 终点（脉动圆）
+    // 终点（普通：紫色脉动圆；色盲：蓝色十字 ✕）
     var pulse = 0.6 + Math.sin(performance.now() / 320) * 0.4;
-    mapCtx.fillStyle = 'rgba(178,125,255,' + pulse.toFixed(2) + ')';
-    mapCtx.beginPath();
-    mapCtx.arc(maze.end.x * cellPx + cellPx / 2, maze.end.y * cellPx + cellPx / 2, Math.max(3, cellPx * 0.45), 0, Math.PI * 2);
-    mapCtx.fill();
+    var endPx = maze.end.x * cellPx + cellPx / 2;
+    var endPy = maze.end.y * cellPx + cellPx / 2;
+    var endR = Math.max(3, cellPx * 0.45);
+    if (cb) {
+      mapCtx.strokeStyle = 'rgba(78,161,255,' + pulse.toFixed(2) + ')';
+      mapCtx.lineWidth = Math.max(1.8, cellPx * 0.22);
+      mapCtx.beginPath();
+      mapCtx.moveTo(endPx - endR, endPy - endR);
+      mapCtx.lineTo(endPx + endR, endPy + endR);
+      mapCtx.moveTo(endPx + endR, endPy - endR);
+      mapCtx.lineTo(endPx - endR, endPy + endR);
+      mapCtx.stroke();
+    } else {
+      mapCtx.fillStyle = 'rgba(178,125,255,' + pulse.toFixed(2) + ')';
+      mapCtx.beginPath();
+      mapCtx.arc(endPx, endPy, endR, 0, Math.PI * 2);
+      mapCtx.fill();
+    }
 
     // 玩家（三角，指示朝向）
     var pg = player.getGrid();
@@ -1206,18 +1307,34 @@
     mapCtx.translate(px, py);
     // yaw=0 时朝向 -Z（地图上方），换算成 canvas 角度
     mapCtx.rotate(-player.yaw);
-    mapCtx.fillStyle = '#35d0ff';
     mapCtx.beginPath();
     mapCtx.moveTo(0, -cellPx * 0.55);
     mapCtx.lineTo(cellPx * 0.38, cellPx * 0.45);
     mapCtx.lineTo(-cellPx * 0.38, cellPx * 0.45);
     mapCtx.closePath();
-    mapCtx.fill();
+    if (cb) {
+      // 色盲：橙色三角 + 白色粗描边，尖端再补一个小箭头强调朝向
+      mapCtx.fillStyle = '#ff9f40';
+      mapCtx.fill();
+      mapCtx.strokeStyle = '#ffffff';
+      mapCtx.lineWidth = Math.max(1.5, cellPx * 0.16);
+      mapCtx.stroke();
+      mapCtx.beginPath();
+      mapCtx.moveTo(0, -cellPx * 0.95);
+      mapCtx.lineTo(-cellPx * 0.16, -cellPx * 0.66);
+      mapCtx.lineTo(cellPx * 0.16, -cellPx * 0.66);
+      mapCtx.closePath();
+      mapCtx.fillStyle = '#ffffff';
+      mapCtx.fill();
+    } else {
+      mapCtx.fillStyle = '#35d0ff';
+      mapCtx.fill();
+    }
     mapCtx.restore();
 
     // 自动寻路路径（若存在）
     if (player.autoPath && player.autoPath.length > 1) {
-      mapCtx.strokeStyle = 'rgba(98,230,255,0.85)';
+      mapCtx.strokeStyle = cb ? '#ffe066' : 'rgba(98,230,255,0.85)';
       mapCtx.lineWidth = Math.max(1.5, cellPx * 0.25);
       mapCtx.beginPath();
       var half = (size * MG.Maze.CELL) / 2;
@@ -1324,6 +1441,11 @@
     return m + 'm ' + r + 's';
   }
 
+  /** 数字千分位格式化：99999 → "99,999" */
+  function formatNum(n) {
+    return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  }
+
   function closestWithClass(node, cls) {
     var t = node;
     while (t && t !== document.body) {
@@ -1414,6 +1536,7 @@
     updateMinimapLock: updateMinimapLock,
     refreshRanking: refreshRanking,
     openRanking: openRanking,
+    openAchievements: openAchievements,
     showReplayBar: showReplayBar,
     hideReplayBar: hideReplayBar,
     updateReplayBar: updateReplayBar,

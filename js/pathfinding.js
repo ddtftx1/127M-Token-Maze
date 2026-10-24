@@ -432,7 +432,8 @@
    * @param {Object} maze 迷宫数据
    * @param {Array<{x,y}>} basePath 基础网格路径（A* 输出，含起终点）
    * @param {Array<{x,y}>} targets 需要顺路拾取的目标网格坐标
-   * @param {Object} [opts] { maxDetour: number } 真实步数阈值，默认 6
+   * @param {Object} [opts] { maxDetour: number, maxSkip: number }
+   *        maxDetour=顺路真实步数阈值（默认 6）；maxSkip=回归点最多向前跳过的路径点数（默认 20）
    * @returns {Array<{x,y}>} 新路径（含绕行段）
    */
   function buildCollectPath(maze, basePath, targets, opts) {
@@ -460,24 +461,36 @@
 
     // 从后往前插入，保证前面计划的索引不失效
     for (var p = plans.length - 1; p >= 0; p--) {
-      result = spliceDetour(maze, result, plans[p], targetSet, size);
+      result = spliceDetour(maze, result, plans[p], targetSet, size, opts);
     }
     return result;
   }
 
-  /** 在路径中插入一段"前往目标并回归"的绕行（内部函数） */
-  function spliceDetour(maze, result, plan, targetSet, size) {
+  /**
+   * 在路径中插入一段"前往目标并回归"的绕行（内部函数）
+   * @param {Object} maze 迷宫数据
+   * @param {Array<{x,y}>} result 当前路径
+   * @param {{x:number,y:number,entry:number}} plan 目标与插入位置
+   * @param {Object} targetSet 目标格集合（防止回归时越过未拾取目标）
+   * @param {number} size 迷宫边长
+   * @param {Object} [opts] { maxSkip:number } 最多向前跳过多少个路径点寻找回归点（默认 20）
+   */
+  function spliceDetour(maze, result, plan, targetSet, size, opts) {
     var entry = plan.entry;
     var entryCell = result[entry];
     if (!entryCell) return result;
+    var maxSkip = (opts && typeof opts.maxSkip === 'number') ? opts.maxSkip : 20;
 
     var distMap = bfsDistMap(maze, plan.x, plan.y);
     if (distMap[entryCell.y * size + entryCell.x] < 0) return result; // 不可达
 
-    // 在路径前方寻找"回归点"：最小化 distMap[回归点] - 索引
+    // 在路径前方寻找"回归点"：
+    // 代价 = 目标到回归点的真实距离 + 跳过路径点数的折半惩罚，
+    // 兼顾"离目标近"和"少跳路"。
+    // （原公式 distMap[j] - j 只偏向"离目标远"，容易绕出大回环）
     var bestJ = entry;
-    var bestVal = distMap[entryCell.y * size + entryCell.x] - entry;
-    var scanEnd = Math.min(result.length - 1, entry + 60);
+    var bestVal = distMap[entryCell.y * size + entryCell.x];
+    var scanEnd = Math.min(result.length - 1, entry + maxSkip);
     for (var j = entry + 1; j <= scanEnd; j++) {
       // 被跳过的路段（entry+1 .. j-1）中若有未拾取目标 → 不能越过
       if (j >= entry + 2) {
@@ -486,7 +499,7 @@
       }
       var dm = distMap[result[j].y * size + result[j].x];
       if (dm < 0) continue;
-      var val = dm - j;
+      var val = dm + (j - entry) * 0.5;
       if (val < bestVal - 1e-9) { bestVal = val; bestJ = j; }
     }
 

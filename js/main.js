@@ -52,6 +52,7 @@
     _hudAccum: 0,
     _portalAccum: 0,      // 传送门环境音触发节流
     _startPending: false,
+    _achieveToastTimer: null, // 通关后延迟弹出成就提示的定时器（离开本局时清理）
     _renderStopped: false // 渲染致命错误后停止循环
   };
 
@@ -160,8 +161,13 @@
   /** 应用雾效（跟随难度浓度 + 设置开关） */
   function applyFog(scene, settings) {
     if (!Game.diff) {
-      // 菜单状态：用主题色淡雾
+      // 菜单状态：不显示雾，但背景要用当前主题的 sky 色
+      // （否则在主菜单切主题时背景永远停在初始主题色）
       scene.fog = null;
+      var menuTheme = MG.Maze.THEMES[settings.theme];
+      if (menuTheme && scene.background && scene.background.setHex) {
+        scene.background.setHex(menuTheme.sky);
+      }
       return;
     }
     if (settings.fog) {
@@ -194,6 +200,11 @@
   /* ------------------------------------------------------------
    * 开始新一局
    * ---------------------------------------------------------- */
+  /** 释放"正在启动"守卫（幽灵弹窗路径的兜底，避免 _startPending 永久为 true） */
+  function releaseStartPending() {
+    Game._startPending = false;
+  }
+
   function startGame(diffKey, seed, isDaily) {
     if (Game._startPending) return;
     Game._startPending = true;
@@ -212,6 +223,8 @@
 
     /** 进入加载流程（useGhost 为 true 且存在回放时才启用幽灵） */
     function proceed(useGhost) {
+      // 重新置位：进入加载流程后，重复点"开始游戏"仍会被守卫拦下（防止连点双开）
+      Game._startPending = true;
       if (useGhost && hasGhost) Game._pendingGhost = ghostFrames;
       MG.UI.showLoading('准备生成迷宫…', 0.05);
       Game.state = 'loading';
@@ -229,19 +242,19 @@
     }
 
     if (hasGhost && ghostMode === 'ask') {
-      // 弹窗询问：玩家确认后再进入 buildLevel
+      // 弹窗询问：玩家必须主动选择后才继续
+      //（点击背景遮罩 / 按 ESC 视为"独自探险"，都属于明确的用户意志，不再做超时自动选择）
       var meta = MG.Replay.loadFull(diffKey, Game.seed);
-      // 超时兜底：15 秒未做选择则按"独自探险"继续，避免弹窗卡住导致 _startPending 永远为 true
-      var ghostTimer = setTimeout(function () {
-        if (MG.UI.cancelGhostDialog) MG.UI.cancelGhostDialog();
-      }, 15000);
-      MG.UI.showGhostDialog({
+      var ghostPrompt = MG.UI.showGhostDialog({
         diffName: Game.diff.name,
         time: (meta && typeof meta.time === 'number' && meta.time > 0)
           ? meta.time
           : (ghostFrames[ghostFrames.length - 1][3] || 0)
-      }).then(function (res) {
-        clearTimeout(ghostTimer);
+      });
+      // 先注册"释放守卫"：弹窗无论以何种方式结束（玩家选择 / 被其它流程关闭），
+      // 都不能让 _startPending 永久为 true，否则之后所有 startGame 会被静默吞掉
+      ghostPrompt.then(releaseStartPending, releaseStartPending);
+      ghostPrompt.then(function (res) {
         if (res.remember) {
           // 记住选择：写入设置（总是启用 / 从不启用）
           MG.Settings.set('ghostMode', res.choice === 'ghost' ? 'always' : 'never');
@@ -373,6 +386,13 @@
     MG.UI.toast('种子：' + Game.seed + '  难度：' + diff.name, 2200);
   }
 
+  /** 各主题的平行光（太阳）颜色：科技冷白 / 地牢暖黄 / 森林偏绿白 */
+  var SUN_COLORS = {
+    tech: 0xffffff,
+    dungeon: 0xffe8c0,
+    forest: 0xe0ffd8
+  };
+
   /** 按主题刷新灯光颜色 */
   function applyLightsForTheme(settings) {
     var theme = MG.Maze.THEMES[settings.theme];
@@ -384,7 +404,13 @@
     if (Game.torch) {
       Game.torch.color.setHex(theme.light);
     }
-    if (Game.scene && Game.scene.background && Game.scene.background.setHex && !settings.fog) {
+    // 太阳光颜色跟随主题（首次仍是白色，切换主题后更新）
+    if (Game.sun) {
+      Game.sun.color.setHex(SUN_COLORS[settings.theme] || SUN_COLORS.tech);
+    }
+    // 背景同步：菜单状态（无雾）与关闭雾效时都跟随主题 sky 色
+    if (Game.scene && Game.scene.background && Game.scene.background.setHex &&
+        (!Game.diff || !settings.fog)) {
       Game.scene.background.setHex(theme.sky);
     }
   }
@@ -406,13 +432,30 @@
       Game.mazeView.dispose();
       Game.mazeView = null;
     }
-    // 清理场景中残留的路径可视化
+    // 清理场景中残留的路径可视化（兜底）
+    // 注意：这里必须递归 dispose，否则 InstancedMesh / ribbon / RingGeometry 的
+    // GPU 资源会随"进出游戏"次数单调增长（此前的只 remove 是泄漏点）
     if (Game.scene) {
       var leftovers = [];
       Game.scene.traverse(function (o) {
         if (o.name === 'autoPathVisual') leftovers.push(o);
       });
-      for (var i = 0; i < leftovers.length; i++) Game.scene.remove(leftovers[i]);
+      for (var i = 0; i < leftovers.length; i++) {
+        var g = leftovers[i];
+        g.traverse(function (o) {
+          if (o.geometry) o.geometry.dispose();
+          if (o.material) {
+            if (Array.isArray(o.material)) {
+              for (var m = 0; m < o.material.length; m++) {
+                if (o.material[m]) o.material[m].dispose();
+              }
+            } else {
+              o.material.dispose();
+            }
+          }
+        });
+        Game.scene.remove(g);
+      }
     }
   }
 
@@ -513,7 +556,9 @@
     }
 
     // 3) 筛选"顺路"目标（按真实行走距离），并作为"保护点"防止被路径简化裁掉
-    var maxDetour = 6; // 真实步数阈值：≤6 步才值得顺路绕行
+    // 阈值 4 步（原 6 步）：往返最坏 8 步，仍能保证"最佳路径"长度不超过最快路径太多，
+    // 避免为了捡远处金币绕出大回环
+    var maxDetour = 4; // 真实步数阈值：≤4 步才值得顺路绕行
     var accepted = MG.Path.findCollectTargets(maze, base, targets, { maxDetour: maxDetour });
     var protectedSet = {};
     for (var a = 0; a < accepted.length; a++) {
@@ -544,6 +589,9 @@
     Game.itemPanelOpen = true;
     Game.state = 'paused'; // 暂停游戏逻辑（计时停止）
     if (Game.input) Game.input.exitPointerLock();
+    // 道具面板遮罩覆盖全屏，HUD 一起隐藏：否则 HUD 上的暂停按钮仍可点，
+    // 但 pauseGame 因 state 已是 paused 直接返回，点了没反应
+    MG.UI.hide('hud');
     MG.UI.showItemPanel();
   }
 
@@ -553,6 +601,7 @@
     MG.UI.hideItemPanel();
     if (Game.state === 'paused') {
       Game.state = 'playing';
+      MG.UI.show('hud'); // 与 openItemPanel 的隐藏成对，恢复 HUD
       Game.clock.getDelta(); // 丢弃暂停期间累积时间
     }
   }
@@ -637,6 +686,7 @@
   }
 
   function restartGame() {
+    clearAchieveToastTimer();
     MG.UI.hidePause();
     // 用同一难度与种子重新生成（同一迷宫再挑战）
     startGame(Game.diffKey, Game.seed, Game.isDaily);
@@ -647,10 +697,12 @@
    * （每日挑战也切换为新的随机迷宫；想复玩当日挑战可回主菜单点"每日挑战"）
    */
   function playAgain() {
+    clearAchieveToastTimer();
     startGame(Game.diffKey, '', false); // 空种子 → startGame 内部生成新的随机种子
   }
 
   function backToMenu() {
+    clearAchieveToastTimer();
     if (Game.itemPanelOpen) {
       Game.itemPanelOpen = false;
       MG.UI.hideItemPanel();
@@ -749,10 +801,21 @@
     if (MG.Audio) MG.Audio.win();
 
     if (newAchievements.length > 0) {
-      setTimeout(function () {
+      // 记住定时器 id：若玩家在 1.2 秒内返回菜单 / 重开 / 再玩一次，要能取消掉
+      if (Game._achieveToastTimer) clearTimeout(Game._achieveToastTimer);
+      Game._achieveToastTimer = setTimeout(function () {
+        Game._achieveToastTimer = null;
         MG.UI.toast('🏆 解锁成就：' + newAchievements.join('、'), 3000);
         if (MG.Audio) MG.Audio.achieve();
       }, 1200);
+    }
+  }
+
+  /** 取消通关后延迟弹出的成就提示（避免 toast 掉到菜单 / 新一局里） */
+  function clearAchieveToastTimer() {
+    if (Game._achieveToastTimer) {
+      clearTimeout(Game._achieveToastTimer);
+      Game._achieveToastTimer = null;
     }
   }
 
@@ -1011,6 +1074,20 @@
   /* ------------------------------------------------------------
    * 设置变更实时生效
    * ---------------------------------------------------------- */
+  /**
+   * 色盲友好模式：即时增删 3D 场景里的文字标识 Sprite
+   * - 不重建关卡：玩家位置 / 计时 / 步数 / 已收集金币与道具状态全部保持
+   * - 文字纹理由 maze.js 内部缓存共享，反复切换只有 Sprite 增删的开销
+   */
+  function refreshColorblindVisuals() {
+    var settings = MG.Settings.get();
+    if (Game.mazeView && typeof Game.mazeView.setColorblind === 'function') {
+      Game.mazeView.setColorblind(!!settings.colorblind);
+    }
+    // 小地图下一次重绘自动跟随（drawMinimap 读取 settings.colorblind），这里顺手加速一帧
+    lastMapDraw = 999;
+  }
+
   function onSettingChanged(evt) {
     var settings = MG.Settings.get();
     if (!Game.camera) return;
@@ -1025,6 +1102,13 @@
     if (evt.key === 'fog' || evt.key === 'theme' || evt.reset) {
       applyFog(Game.scene, settings);
       applyLightsForTheme(settings);
+    }
+
+    // 主题：3D 场景的墙体 / 地板 / 天花板材质颜色也要跟着换（否则会一半科技风一半地牢风）
+    if (evt.key === 'theme' || evt.reset) {
+      if (Game.mazeView && typeof Game.mazeView.applyTheme === 'function') {
+        Game.mazeView.applyTheme(settings.theme);
+      }
     }
 
     // 阴影
@@ -1073,9 +1157,19 @@
       MG.UI.applyThemeToBody();
     }
 
+    // 色盲友好模式：3D 文字标识即时增删（不重建关卡、不丢进度）
+    if (evt.key === 'colorblind' || evt.reset) {
+      refreshColorblindVisuals();
+    }
+
     // 小地图开关 → 立刻刷新 HUD 显示
     if (evt.key === 'minimap' || evt.reset) {
       updateHudData();
+    }
+
+    // 「小地图显示全部金币」→ 强制下一次主循环立即重绘小地图，切换即时生效
+    if (evt.key === 'minimapCoins') {
+      lastMapDraw = 999;
     }
   }
 
@@ -1084,6 +1178,8 @@
    * ---------------------------------------------------------- */
   function fatal(title, msg) {
     Game.state = 'menu';
+    // 停止渲染循环：否则 WebGL 初始化失败等场景下每帧仍会尝试 render 并反复抛异常
+    Game._renderStopped = true;
     var app = MG.UI.el['app'];
     if (!app) { alert(title + '\n' + msg); return; }
     var overlay = document.createElement('div');

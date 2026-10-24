@@ -2,7 +2,7 @@
  * js/input.js
  * 输入模块（同时支持触屏与键鼠）
  * - 手机：左下虚拟摇杆（触摸拖动、松手回中）+ 空白区域滑动转视角
- * - 电脑：WASD / 方向键移动，Pointer Lock 鼠标转视角，左键拖动转视角
+ * - 电脑：WASD / 方向键移动，Pointer Lock 鼠标转视角（点击画面锁定，ESC 退出）
  * - 阻止页面滚动、缩放、长按菜单
  * - 快捷键：R 重开 / M 小地图 / P·ESC 暂停 / F 自动寻路
  * ============================================================ */
@@ -43,10 +43,8 @@
     this._lookId = null;
     this._lookLast = { x: 0, y: 0 };
 
-    // 鼠标状态
+    // 鼠标状态（只保留 Pointer Lock；不再有"按住拖动"模式）
     this.pointerLocked = false;
-    this._mouseDown = false;
-    this._mouseLast = { x: 0, y: 0 };
 
     // 回调（由主循环注入）
     this.onPause = null;
@@ -83,7 +81,6 @@
       }
       if (e.cancelable) e.preventDefault();
     }, { passive: false });
-    document.addEventListener('dblclick', function (e) { e.preventDefault(); }, { passive: false });
 
     /* ---------- 虚拟摇杆（触摸） ---------- */
     this.joystickEl.addEventListener('touchstart', function (e) {
@@ -160,7 +157,10 @@
 
     /* ---------- 键盘 ---------- */
     window.addEventListener('keydown', function (e) {
-      if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT')) return;
+      // 输入控件聚焦时不触发游戏快捷键（含多行输入与富文本，避免以后加输入框踩坑）
+      var tag = e.target && e.target.tagName;
+      if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA' ||
+          (e.target && e.target.isContentEditable)) return;
       self._notifyFirstInput();
       var k = e.key.toLowerCase();
       self.keys[k] = true;
@@ -197,9 +197,11 @@
       self._resetKnob();
     });
 
-    /* ---------- 鼠标：Pointer Lock + 左键拖动 ----------
+    /* ---------- 鼠标：Pointer Lock（标准第一人称交互） ----------
        注意：#look-layer 覆盖在 canvas 之上，因此鼠标事件必须绑定在它上面，
-       否则桌面端"拖动转视角 / 点击锁定指针"都不会触发。 */
+       否则"点击锁定指针"不会触发。
+       锁定后光标隐藏，移动鼠标即转视角；按 ESC 或窗口失焦时由浏览器自动退出并恢复光标。
+       不再保留"按住左键拖动转视角"：那种写法在鼠标拖出窗口后松开时会卡住视角自转。 */
     var mouseTargets = [this.lookLayer, this.canvas];
     for (var mi = 0; mi < mouseTargets.length; mi++) {
       (function (node) {
@@ -207,37 +209,30 @@
         node.addEventListener('mousedown', function (e) {
           if (e.button !== 0) return;
           self._notifyFirstInput();
-          self._mouseDown = true;
-          self._mouseLast.x = e.clientX;
-          self._mouseLast.y = e.clientY;
         });
-        // 点击空白区域 → 请求指针锁定（仅桌面端）
+        // 点击画面即尝试进入 Pointer Lock（不按设备类型判断，触屏笔记本 / iPad + 键鼠同样可用）
         node.addEventListener('click', function () {
-          if (!isTouchDevice() && !self.pointerLocked && !document.hidden) {
+          if (!self.pointerLocked && !document.hidden) {
             self.requestPointerLock();
           }
         });
+        // 双击只在游戏画面区域阻止默认行为；输入框 / 面板等保留浏览器默认（可正常双击选词）
+        node.addEventListener('dblclick', function (e) { e.preventDefault(); }, { passive: false });
       })(mouseTargets[mi]);
     }
 
-    window.addEventListener('mouseup', function () { self._mouseDown = false; });
-
     window.addEventListener('mousemove', function (e) {
-      if (self.pointerLocked) {
-        // 锁定模式：movementX/Y 为原始位移
-        self.lookDX += e.movementX || 0;
-        self.lookDY += e.movementY || 0;
-      } else if (self._mouseDown) {
-        // 拖动模式
-        self.lookDX += e.clientX - self._mouseLast.x;
-        self.lookDY += e.clientY - self._mouseLast.y;
-        self._mouseLast.x = e.clientX;
-        self._mouseLast.y = e.clientY;
-      }
+      // 只有锁定状态才转视角：movementX/Y 是原始位移，鼠标可无限移动，不会撞到窗口边缘
+      if (!self.pointerLocked) return;
+      self.lookDX += e.movementX || 0;
+      self.lookDY += e.movementY || 0;
     });
 
     document.addEventListener('pointerlockchange', function () {
       self.pointerLocked = (document.pointerLockElement === self.canvas);
+      // 清空切换瞬间可能产生的一次性大位移，避免退出锁定时"视角跳一下"
+      self.lookDX = 0;
+      self.lookDY = 0;
     });
 
     /* ---------- 窗口尺寸变化（摇杆半径需要重算） ---------- */
@@ -307,12 +302,26 @@
    * 指针锁定
    * ---------------------------------------------------------- */
   Input.prototype.requestPointerLock = function () {
+    var self = this;
     try {
-      if (this.canvas.requestPointerLock) {
-        var p = this.canvas.requestPointerLock();
-        if (p && p.catch) p.catch(function () {});
+      if (self.canvas && self.canvas.requestPointerLock) {
+        // 优先请求 unadjustedMovement（禁用系统鼠标加速，FPS 手感更跟手）
+        // 必须在用户手势（click）的调用栈里同步发起，不能包 setTimeout
+        var p;
+        try {
+          p = self.canvas.requestPointerLock({ unadjustedMovement: true });
+        } catch (e) {
+          // 旧浏览器 / Safari 不支持该选项 → 降级为普通请求
+          p = self.canvas.requestPointerLock();
+        }
+        // Chrome 可能返回 rejected Promise（比如权限被拒），降级重试一次，失败静默
+        if (p && p.catch) {
+          p.catch(function () {
+            try { self.canvas.requestPointerLock(); } catch (e2) { /* 忽略 */ }
+          });
+        }
       }
-    } catch (e) { /* 忽略 */ }
+    } catch (e) { /* 静默忽略：iOS / iPadOS Safari 无此 API */ }
   };
 
   Input.prototype.exitPointerLock = function () {

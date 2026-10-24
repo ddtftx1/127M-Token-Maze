@@ -49,7 +49,13 @@
     this.baseSpeed = 3.6;          // 每秒米（会乘以设置倍率）
     this.bobPhase = 0;             // 头部晃动相位
     this.bobAmount = 0.045;        // 晃动幅度
+    this._bobDamping = 1;          // 晃动衰减系数（静止时衰减到 0，避免站定盯墙时相机一直在抖）
     this.stepDistance = 0;         // 累计行走距离（用于脚步音效）
+
+    // 到终点网格距离缓存（同一格内复用，避免每 100ms 全图 BFS）
+    this._lastDistGridX = -1;
+    this._lastDistGridY = -1;
+    this._lastDistValue = -1;
 
     // 自动寻路状态
     this.autoPath = null;          // 世界路径 [{x,z}]
@@ -115,7 +121,7 @@
 
   /** 把相机位置/朝向同步到 Three.js */
   Player.prototype.syncCamera = function () {
-    var bob = Math.sin(this.bobPhase) * this.bobAmount;
+    var bob = Math.sin(this.bobPhase) * this.bobAmount * this._bobDamping;
     this.camera.position.set(this.pos.x, this.eyeHeight + bob, this.pos.z);
     // 使用 YXZ 顺序：先 yaw 后 pitch，避免翻滚
     this.camera.rotation.order = 'YXZ';
@@ -229,10 +235,13 @@
     var mx = input.moveX || 0;
     var my = input.moveY || 0;
     if (mx === 0 && my === 0) {
-      // 静止：晃动相位缓慢回落
+      // 静止：相位继续自然演进，但晃动幅度快速衰减到 0（约 0.17 秒）
       this.bobPhase += dt * 2;
+      this._bobDamping = Math.max(0, this._bobDamping - dt * 6);
       return;
     }
+    // 移动：晃动幅度恢复到满值
+    this._bobDamping = Math.min(1, this._bobDamping + dt * 4);
 
     // 输入向量长度限幅
     var len = Math.sqrt(mx * mx + my * my);
@@ -377,7 +386,16 @@
           this._stuckToastAt = nowT;
           if (MG.UI && MG.UI.toast) MG.UI.toast('路径受阻，正在重规划…', 1500);
         }
+        // 跳点：连续跳过路径点，直到下一个点离玩家超过 0.5 米（或路径结束）。
+        // 拐角处 toWorldPath 插了多个贝塞尔采样点，一次只跳一格会一顿一顿地抽搐
         this.autoIndex++;
+        while (this.autoIndex < path.length) {
+          var nxt = path[this.autoIndex];
+          var ndx = nxt.x - this.pos.x;
+          var ndz = nxt.z - this.pos.z;
+          if (ndx * ndx + ndz * ndz > 0.25) break; // 0.5 米之外才停下
+          this.autoIndex++;
+        }
         if (this.autoIndex >= path.length) this.finishAutoPath();
       }
     }
@@ -561,10 +579,18 @@
     return { x: gx, y: gy };
   };
 
-  /** 到终点的最短步数（网格） */
+  /** 到终点的最短步数（网格）；同一格内复用上次 BFS 结果，避免每 100ms 全图重算 */
   Player.prototype.distanceToEnd = function () {
     if (!MG.Path) return -1;
-    return MG.Path.gridDistance(this.maze, this.getGrid(), this.maze.end);
+    var g = this.getGrid();
+    if (g.x === this._lastDistGridX && g.y === this._lastDistGridY) {
+      return this._lastDistValue;
+    }
+    var d = MG.Path.gridDistance(this.maze, g, this.maze.end);
+    this._lastDistGridX = g.x;
+    this._lastDistGridY = g.y;
+    this._lastDistValue = d;
+    return d;
   };
 
   /** 到终点的直线距离（米） */
@@ -606,6 +632,10 @@
     this.yaw = 0;
     this.pitch = 0;
     this.bobPhase = 0;
+    this._bobDamping = 1;
+    this._lastDistGridX = -1;
+    this._lastDistGridY = -1;
+    this._lastDistValue = -1;
     this.steps = 0;
     this.stepDistance = 0;
     this.cancelAutoPath();

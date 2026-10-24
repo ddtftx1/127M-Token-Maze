@@ -30,6 +30,7 @@
     shadows: false,       // 阴影开关
     fog: true,            // 雾效开关
     minimap: true,        // 小地图开关
+    minimapCoins: false,  // 小地图显示全部金币位置（未探索用轮廓）
     volume: 0.6,          // 音量 0~1
     sfx: true,            // 音效开关
     theme: 'tech',        // 主题 tech | dungeon | forest
@@ -97,6 +98,7 @@
     if (typeof data.shadows === 'boolean') settings.shadows = data.shadows;
     if (typeof data.fog === 'boolean') settings.fog = data.fog;
     if (typeof data.minimap === 'boolean') settings.minimap = data.minimap;
+    if (typeof data.minimapCoins === 'boolean') settings.minimapCoins = data.minimapCoins;
     if (typeof data.volume === 'number') settings.volume = clamp(data.volume, 0, 1);
     if (typeof data.sfx === 'boolean') settings.sfx = data.sfx;
     if (['tech', 'dungeon', 'forest'].indexOf(data.theme) >= 0) settings.theme = data.theme;
@@ -132,6 +134,8 @@
   function setSetting(key, value) {
     if (!(key in DEFAULT_SETTINGS)) return;
     settings[key] = value;
+    // 用户手动改过画质 → 关掉自动性能适配，避免下次加载被静默降回 mid
+    if (key === 'quality') settings.autoPerformance = false;
     saveSettings();
     emit({ key: key, value: value, settings: settings });
   }
@@ -180,7 +184,13 @@
     var rec = loadRecords();
     var cur = rec[diff];
     var isBest = false;
-    if (!cur || time < cur.time || (time === cur.time && steps < cur.steps)) {
+    // 时间按 1ms 容差比较：存储的是未舍入的 elapsed，浮点严格相等几乎不可能命中，
+    // 会导致"同样快但步数更少"无法更新记录
+    var EPS = 1e-3;
+    var better = !cur ||
+      (time < cur.time - EPS) ||
+      (Math.abs(time - cur.time) <= EPS && steps < cur.steps);
+    if (better) {
       rec[diff] = { time: time, steps: steps, date: new Date().toISOString().slice(0, 10) };
       saveRecords(rec);
       isBest = true;
@@ -234,7 +244,6 @@
   MG.Settings = {
     DEFAULT_SETTINGS: DEFAULT_SETTINGS,
     ACHIEVEMENTS: ACHIEVEMENTS,
-    data: settings, // 注意：resetSettings 后会替换引用，尽量用 get()
     get: function () { return settings; },
     load: loadSettings,
     save: saveSettings,
@@ -251,5 +260,13 @@
     bumpCounter: bumpCounter,
     getCounter: getCounter
   };
+
+  // data 只作为只读兼容入口：始终指向"当前"设置对象，
+  // 不再是可能过期的旧快照（resetSettings 后引用会被替换）
+  Object.defineProperty(MG.Settings, 'data', {
+    get: function () { return settings; },
+    enumerable: false,
+    configurable: true
+  });
 
 })(window);

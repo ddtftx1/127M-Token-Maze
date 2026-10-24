@@ -1,0 +1,316 @@
+你正在维护一个纯前端 3D 迷宫游戏项目（Three.js r160 UMD，无构建工具，模块用 IIFE + 全局 MG 命名空间组织）。现有文件：index.html、css/style.css、js/{settings,audio,maze,pathfinding,player,input,ranking,shop,replay,ui,main}.js。
+
+本次改动只做下面三件事，不要改其他逻辑，不要引入新依赖。
+
+════════════════════════════════════════
+【全局硬约束，优先级最高】竖屏与桌面端零回归
+════════════════════════════════════════
+
+本次所有改动只允许影响「手机横屏」这一种场景。以下场景的视觉与交互必须与改动前 100% 一致，任何像素偏差都视为不合格：
+
+1. 所有竖屏（orientation: portrait），无论高度多少，包括但不限于 360×640、375×667、390×844、393×852、412×915、428×926、768×1024。竖屏下不允许出现任何两列、网格、限高、字号缩小等横屏效果。
+2. 桌面宽屏（高度 > 640px 的横屏窗口），例如 1920×1080、1440×900、1366×768 中高度大于 640 的、1280×800。这些必须继续走「单列 620px 居中面板」的原有布局。
+3. 平板横屏（如 iPad 1024×768、1180×820）高度 > 640，同样不属于本次横屏适配范围，保持桌面式布局即可。
+4. 竖屏与桌面端的所有 HUD 控件位置、尺寸、间距、点击热区一律不动。
+
+实现手段：横屏适配块必须放在 style.css 文件末尾，只通过 @media (orientation: landscape) and (max-height: 640px) 触发；主菜单的列容器 .menu-grid 在默认（竖屏）状态下必须是 display: block，绝不能在未加媒体查询时变成 grid。
+
+════════════════════════════════════════
+任务一：修复「暂停 → 设置 → 返回」后 HUD 消失的 bug
+════════════════════════════════════════
+
+【复现路径】
+游戏中（state=playing）点击 ⏸ → 弹出暂停菜单 → 点击「设置」→ 进入设置面板 → 直接点击「返回」。此时透过暂停菜单的半透明背景看不到 HUD；若再点「继续游戏」，HUD 彻底消失，且此后无法恢复。竖屏横屏都能复现，横屏下更明显。
+
+【根因】
+ui.js 的 closeSettings() 里，settingsFrom==='pause-menu' 分支只调用了 show('pause-menu')，没有恢复此前被 showSettings() 隐藏的 HUD；resumeGame() 也没有兜底 show('hud')。对比 settingsFrom==='hud' 分支是有 show('hud') 的，属于分支不对称遗漏。
+
+【修复要求】
+1. js/ui.js 的 closeSettings() 中，settingsFrom === 'pause-menu' 分支里，在 show('pause-menu') 之前补一行 show('hud')，使「从暂停进设置再返回」后的界面状态与「直接暂停」完全一致（暂停菜单覆盖在可见的 HUD 之上）。
+2. js/main.js 的 resumeGame() 中，在 hidePause() 之后、Game.state = 'playing' 之前补一行 MG.UI.show('hud')，作为兜底：无论从哪条路径恢复游戏，HUD 都必须可见。以后新增暂停入口也不会再踩同样的坑。
+3. 修复后自查其他 hide('hud') 的位置是否都有恢复路径：
+   - showGame() 里有 show('hud')，正常。
+   - showWin() / showMainMenu() 隐藏 HUD 后被新界面替代，无需恢复，正常。
+   - 道具面板不隐藏 HUD，正常。
+   若发现遗漏请一并补上，并在回复中说明。
+
+════════════════════════════════════════
+任务二：手机横屏适配（重排布局，不是等比拉伸）
+════════════════════════════════════════
+
+【现状问题】
+css/style.css 末尾只有一个 @media (orientation: landscape) and (max-height: 520px) 块，仅做了「面板加宽到 720px、字号缩一点、HUD 元素缩小」，本质是把竖屏布局压扁。结果：
+- 主菜单在手机横屏（约 375px 高）里仍是一条很长的纵向流（标题→难度→种子→记录→按钮→成就→提示），必须滚动才能看到「开始游戏」。
+- 设置面板单列 4 个分组，横屏要滚两屏。
+- 胜利统计 6 行纵向、暂停按钮 4 行纵向，几乎撑满屏高。
+- HUD 顶部状态栏仍可能换行。
+
+【目标】
+只在「手机横屏」下改变布局结构，让主要操作一屏内完成。竖屏与桌面端不受影响（见全局硬约束）。
+
+【具体改动】
+
+一、index.html —— 主菜单加列容器（只加结构，所有 id 原样保留，ui.js 不需要改动）
+
+把 #main-menu 里 .menu-panel 的内容替换为以下结构（原有 id、class、文本、属性一律不动，只包一层 .menu-hero 和 .menu-grid / .menu-col）：
+
+<div class="panel menu-panel">
+  <div class="menu-hero">
+    <h1 class="game-title">3D迷宫探险</h1>
+    <p class="subtitle">第一人称 3D 迷宫 · 自动寻路 · 每日挑战</p>
+  </div>
+
+  <div class="menu-grid">
+    <div class="menu-col">
+      <div class="section-label">选择难度</div>
+      <div class="diff-list" id="diff-list">
+        <!-- 三个 .diff-card 原样保留，data-diff、文本、选中态都不动 -->
+      </div>
+    </div>
+
+    <div class="menu-col">
+      <div class="section-label">迷宫种子（可留空随机）</div>
+      <div class="seed-row">
+        <input id="seed-input" ... />
+        <button id="btn-seed-random" ...>随机</button>
+        <button id="btn-seed-copy" ...>复制</button>
+      </div>
+      <button id="btn-daily" ...>📅 每日挑战（世界同步种子）</button>
+
+      <div class="section-label">最佳记录</div>
+      <ul id="best-records" class="record-list"></ul>
+
+      <div class="btn-row">
+        <button id="btn-start" ...>开始游戏</button>
+        <button id="btn-settings-menu" ...>设置</button>
+      </div>
+      <button id="btn-ranking-menu" ...>🏆 本地排行榜</button>
+      <button id="btn-shop" ...>🏪 商店</button>
+
+      <details class="achievements">
+        <summary>🏆 成就</summary>
+        <ul id="achievements-list" class="record-list"></ul>
+      </details>
+    </div>
+  </div>
+
+  <p class="hint-text">
+    手机：左下摇杆移动，空白处滑动转视角。<br />
+    电脑：WASD / 方向键移动，鼠标转视角（点击锁定指针），R 重开，M 小地图，P 暂停，F 道具面板。
+  </p>
+</div>
+
+默认（竖屏）状态下 .menu-grid 必须是 display: block，.menu-col 上下堆叠，视觉与原来完全一致。
+
+二、css/style.css —— 删掉旧的横屏块，换成新的
+
+1. 删除文件末尾现有的整个 @media (orientation: landscape) and (max-height: 520px) { ... } 块。
+2. 新增下面这一整块，放在文件最末尾。阈值 max-height: 640px 覆盖手机横屏（320～430 高）和小平板横屏（接近 640 的）；桌面与平板竖屏不受影响。所有限高处同时写 100vh 和 100dvh 两行（后者覆盖前者，兼容移动端地址栏伸缩）：
+
+/* ============================================================
+   横屏适配（仅手机横屏 / 矮屏横屏）
+   不是等比压缩，而是重新组织布局：
+   - 主菜单：标题独占一行，难度 vs 其他内容左右两列
+   - 设置：分组两列网格
+   - 胜利 / 排行榜 / 商店：限高 + 双列
+   - 游戏内 HUD：状态栏单行、四角控件缩尺寸但不移位
+   竖屏与高度 > 640 的横屏一律不进入本块。
+   ============================================================ */
+@media (orientation: landscape) and (max-height: 640px) {
+
+  /* 通用面板：限高、允许内部滚动 */
+  .screen { padding: calc(6px + var(--safe-t)) calc(6px + var(--safe-r))
+                     calc(6px + var(--safe-b)) calc(6px + var(--safe-l)); }
+  .panel {
+    max-width: min(96vw, 920px);
+    max-height: calc(100vh - 12px);
+    max-height: calc(100dvh - 12px);
+    padding: 12px 18px;
+    border-radius: 16px;
+  }
+  .panel-narrow { max-width: min(92vw, 560px); }
+  .panel-title { font-size: 18px; margin-bottom: 8px; }
+
+  /* 主菜单：两列 */
+  .menu-panel { max-width: min(96vw, 940px); }
+  .menu-hero { text-align: center; }
+  .game-title { font-size: 26px; letter-spacing: 2px; margin-bottom: 2px; }
+  .subtitle { font-size: 12px; margin-bottom: 6px; }
+
+  .menu-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    column-gap: 24px;
+    align-items: start;
+  }
+  .menu-col > .section-label:first-child { margin-top: 4px; }
+  .section-label { margin: 8px 0 6px; font-size: 12px; letter-spacing: .5px; }
+
+  .diff-list { gap: 8px; }
+  .diff-card { min-height: 52px; padding: 9px 13px; border-radius: 12px; }
+  .diff-card .diff-name { font-size: 15px; }
+  .diff-card .diff-desc { font-size: 11px; line-height: 1.45; }
+
+  .record-list li { padding: 7px 10px; font-size: 13px; }
+  .btn-row { margin-top: 10px; gap: 8px; }
+  .primary-btn, .secondary-btn { min-height: 46px; font-size: 15px; padding: 12px 16px; }
+  .mini-btn { min-height: 40px; }
+  .mini-btn.wide { margin-top: 6px; }
+  .achievements { margin-top: 8px; }
+  .achievements summary { padding: 6px 0; }
+  .hint-text { margin-top: 8px; font-size: 10.5px; line-height: 1.6; }
+
+  /* 设置面板：两列分组 */
+  .settings-panel { max-width: min(96vw, 900px); }
+  .settings-scroll {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 10px 14px;
+    align-items: start;
+    max-height: calc(100vh - 130px);
+    max-height: calc(100dvh - 130px);
+    padding-right: 2px;
+  }
+  .setting-group { margin-bottom: 0; padding: 10px; border-radius: 12px; }
+  .setting-group-title { margin-bottom: 6px; font-size: 12px; }
+  .setting-row { margin-bottom: 10px; }
+  .setting-row label { font-size: 13px; }
+  .switch { width: 48px; height: 28px; }
+  .switch::after { width: 22px; height: 22px; }
+  .switch:checked::after { transform: translateX(20px); }
+  .slider { height: 5px; }
+  .slider::-webkit-slider-thumb { width: 22px; height: 22px; }
+  .select-input { padding: 8px 10px; min-height: 38px; font-size: 13px; }
+
+  /* 胜利界面：统计双列 */
+  .win-title { font-size: 20px; margin-bottom: 8px; }
+  .win-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 10px; }
+  .win-stats li { padding: 8px 12px; font-size: 13px; }
+
+  /* 排行榜 */
+  .ranking-tabs { margin-bottom: 8px; }
+  .ranking-tab { padding: 8px 0; font-size: 13px; }
+  .ranking-list { max-height: calc(100vh - 200px); max-height: calc(100dvh - 200px); }
+  .ranking-list li { padding: 6px 10px; }
+
+  /* 商店 */
+  .shop-balance { margin-bottom: 8px; font-size: 13px; }
+  .shop-balance b { font-size: 17px; }
+  .shop-list { max-height: calc(100vh - 170px); max-height: calc(100dvh - 170px); gap: 8px; }
+  .shop-card { padding: 9px 12px; gap: 8px; }
+  .shop-icon { width: 34px; font-size: 22px; }
+  .shop-name { font-size: 14px; }
+  .shop-desc { font-size: 11px; line-height: 1.4; }
+
+  /* 暂停菜单：4 个按钮 2×2，避免纵向过长 */
+  #pause-menu .menu-vertical {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+  }
+  #pause-menu .menu-vertical > button { min-height: 48px; }
+  #pause-menu .panel-narrow { max-width: min(90vw, 460px); }
+
+  /* 道具面板 / 幽灵 / 彩蛋：窄面板压缩 */
+  .item-panel-hint { margin-top: 8px; }
+  .ghost-msg { margin-bottom: 10px; line-height: 1.6; }
+
+  /* 游戏内 HUD：四角布局保持不变，只压缩尺寸 */
+  .hud-top {
+    top: calc(6px + var(--safe-t));
+    left: calc(6px + var(--safe-l));
+    right: calc(6px + var(--safe-r));
+  }
+  .hud-stats { flex-wrap: nowrap; gap: 5px; }
+  .stat { min-width: 52px; padding: 4px 8px; border-radius: 9px; }
+  .stat-label { font-size: 9px; letter-spacing: .5px; }
+  .stat-value { font-size: 13px; }
+
+  .hud-buttons { gap: 5px; }
+  .icon-btn { width: 40px; height: 40px; font-size: 17px; border-radius: 10px; }
+
+  .hud-right { top: calc(52px + var(--safe-t)); gap: 5px; }
+  .compass-ring { width: 42px; height: 42px; }
+  .compass-arrow { font-size: 16px; }
+  .compass-dist { font-size: 10px; }
+  .minimap-wrap { width: min(26vh, 132px); height: min(26vh, 132px); }
+  #minimap { border-radius: 12px; }
+
+  .joystick {
+    width: 108px; height: 108px;
+    left: calc(12px + var(--safe-l));
+    bottom: calc(12px + var(--safe-b));
+  }
+  .joystick-knob { width: 50px; height: 50px; margin: -25px 0 0 -25px; }
+
+  .hud-bottom-right {
+    right: calc(12px + var(--safe-r));
+    bottom: calc(14px + var(--safe-b));
+    gap: 8px;
+  }
+  .action-btn { min-width: 112px; min-height: 48px; padding: 0 16px; font-size: 14px; border-radius: 13px; }
+
+  .toast { bottom: calc(18% + var(--safe-b)); font-size: 13px; padding: 8px 14px; }
+
+  /* 回放控制条 */
+  .replay-bar { bottom: calc(10px + var(--safe-b)); padding: 6px 10px; gap: 6px; }
+  .replay-time { min-width: 96px; font-size: 12px; }
+}
+
+三、任务二必须遵守的约束
+
+1. 不要修改任何 js 逻辑（任务一的 bug 修复除外）。input.js 里对 HUD 容器的引用、main.js 里的状态机、ui.js 里所有 id 查找都依赖现有 DOM 结构，重构 index.html 时所有 id 和 class 必须原样保留，只新增 .menu-hero / .menu-grid / .menu-col 三个包裹层。
+2. 竖屏、桌面端、平板横屏（高度 > 640）一律进入本媒体查询块之外，保持原有视觉与交互（见全局硬约束）。
+3. HUD 不做位移重排（四角控件位置不变），只做尺寸压缩 + 顶部状态栏 flex-wrap: nowrap。
+4. 所有限高处同时写 100vh 和 100dvh 两行。
+5. 不要动 --safe-* 安全区变量的使用方式，横屏下 left/right 的安全区（刘海）必须保留；HUD 顶部状态栏、左下摇杆、右下动作按钮、右上小地图都不能侵入刘海区。
+6. 不新增任何 js 事件监听；横屏切换由浏览器触发 resize/orientationchange 后，现有 main.js 的 onResize 会重算渲染尺寸，CSS 媒体查询会自动切换，无需额外代码。
+
+════════════════════════════════════════
+任务三：手机横屏边界场景补充验收（这几条也要修到位）
+════════════════════════════════════════
+
+除上面两种典型横屏（844×390、667×375）外，以下横屏边界场景同样必须通过，发现问题请一并修复：
+
+1. 极矮横屏 568×320（iPhone SE1 / 5 横屏）、640×360（小 Android 横屏）：
+   - 主菜单两列不能被挤成单列，.menu-grid 的 grid-template-columns 用 minmax(0, 1fr) 保证不撑破；
+   - .panel 的 max-height: calc(100dvh - 12px) 必须生效，面板内部滚动，不允许整页出现第二条滚动条；
+   - 开始按钮、成就 summary 必须可点，不能被裁切。
+2. 大刘海横屏 926×428（iPhone 14 Pro Max 横屏）、844×390（iPhone 13 横屏）：
+   - HUD 顶部状态栏、左下摇杆、右下动作按钮、右上小地图全部在 --safe-l / --safe-r / --safe-t / --safe-b 之内；
+   - 设置面板、商店面板的两列分组不能压到刘海区。
+3. 横屏下打开设置 → 拖动滑块 → 返回（暂停菜单）→ 继续游戏：设置变更实时生效（FOV、雾效、主题），返回后 HUD 可见，游戏可继续操作（这条同时覆盖任务一的回归）。
+4. 横屏下打开道具面板、幽灵询问弹窗、隐藏彩蛋弹窗：面板宽高不超屏、内容可滚动、按钮可点、关闭路径正常。
+5. 横屏下游戏内触发 toast（如「种子：xxx 难度：xxx」「+1 金币」）：toast 不遮挡摇杆与动作按钮，不超出安全区。
+6. 横屏下打开胜利界面：.win-stats 双列、再玩一次 / 返回主菜单按钮在首屏内可见；点击「回放」进入 replay-bar 时，控制条不超出安全区且不遮挡幽灵模型。
+7. 横屏下小地图未解锁（未拾取地图卷轴）：.minimap-lock 占位文案与提示完整显示，不被裁切；指南针距离隐藏逻辑（applyDistanceVisibility）行为正常。
+8. 横竖屏来回切换（游戏进行中横竖切换、菜单页横竖切换、设置面板横竖切换）：不崩溃、不残留错位、HUD 元素回到正确位置；切换后再进入设置并返回，HUD 仍可见（呼应任务一）。
+
+════════════════════════════════════════
+任务四：竖屏 / 桌面端回归检查（改动后必须逐条确认，全部通过才算完成）
+════════════════════════════════════════
+
+在竖屏与桌面端，以下内容必须与改动前完全一致，任何一条不通过都视为不合格：
+
+1. 竖屏主菜单：标题、副标题、难度三张卡、种子行、每日挑战、最佳记录、开始/设置按钮、排行榜、商店、成就折叠、底部提示，视觉与交互与改动前完全一致；.menu-grid 在竖屏下必须是 display: block，不能出现两列。
+2. 竖屏设置面板：4 个分组纵向排列、滑块/开关/下拉样式、滚动区域高度与改动前一致。
+3. 竖屏 HUD：顶部状态栏（时间/步数/难度/距离/本局金币/余额）、右上指南针与小地图、左下摇杆（130px）、右下动作按钮（128px 高 54px）、toast 位置，全部与改动前一致。
+4. 竖屏暂停菜单：4 个按钮纵向排列，与改动前一致。
+5. 竖屏胜利界面：6 行统计纵向排列，与改动前一致。
+6. 竖屏排行榜、商店、道具面板、幽灵弹窗、彩蛋弹窗、回放条：与改动前一致。
+7. 桌面 1920×1080、1440×900、1366×768（高度都 > 640）：主菜单仍是单列 620px 居中；设置面板、暂停菜单、胜利界面仍是原布局；HUD 尺寸不变。
+8. 平板横屏 1024×768、1180×820（高度 > 640）：与桌面端一致，不触发横屏重排。
+9. 竖屏下「暂停 → 设置 → 返回 → 继续游戏」，HUD 同样必须恢复（任务一的修复与屏幕方向无关，竖屏也要通过）。
+10. 竖屏下走「暂停 → 设置 → 返回 → 继续」后再触发一次横屏切换，界面不崩、HUD 仍可见。
+
+════════════════════════════════════════
+完成后请在回复中依次说明
+════════════════════════════════════════
+
+1. 任务一修复后，竖屏与横屏分别走「暂停 → 设置 → 返回 → 继续游戏」，HUD 是否恢复。
+2. 任务二改动清单（文件、行号区间、新增/删除/修改了什么）。
+3. 任务三的 8 个边界场景，逐条给出「通过 / 已修复 / 需要更多信息」的结论；若发现新问题请说明修复方式。
+4. 任务四的 10 条竖屏 / 桌面端回归项，逐条给出「一致 / 有差异及差异点 / 已修复」的结论。
+5. 如果为了满足上面某条而不得不修改 js（除任务一外），必须单独说明原因，否则视为违反约束。
+
+只输出改动后的文件（index.html 中 #main-menu 片段 + css/style.css 完整内容，或你选择的其他等价形式），以及上述自查结论。不要输出与任务无关的解释。

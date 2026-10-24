@@ -162,6 +162,13 @@ html, body {
   margin-bottom: 18px;
 }
 
+/* 主菜单列容器：默认（竖屏 / 桌面端）就是普通单列区块，
+   逐个子元素仍按原顺序纵向堆叠，视觉与重构前完全一致；
+   只有文件末尾的「手机横屏」媒体查询才会把它改成两列网格。 */
+.menu-hero { display: block; }
+.menu-grid { display: block; }
+.menu-col { display: block; }
+
 .section-label {
   font-size: 13px;
   color: var(--text-dim);
@@ -1017,27 +1024,6 @@ html, body {
   accent-color: var(--accent);
 }
 
-/* ============================================================
-   横屏适配（矮屏时压缩面板与 HUD）
-   ============================================================ */
-@media (orientation: landscape) and (max-height: 520px) {
-  .panel {
-    max-width: 720px;
-    padding: 14px 16px;
-    border-radius: 16px;
-  }
-  .game-title { font-size: 26px; letter-spacing: 2px; }
-  .subtitle { margin-bottom: 10px; }
-  .diff-card { padding: 10px 12px; min-height: 50px; }
-  .diff-card .diff-name { font-size: 15px; }
-  .diff-card .diff-desc { font-size: 11px; }
-  .settings-scroll { max-height: 52vh; }
-  .hud-right { top: calc(56px + var(--safe-t)); }
-  .minimap-wrap { width: min(24vh, 140px); height: min(24vh, 140px); }
-  .joystick { width: 112px; height: 112px; }
-  .joystick-knob { width: 50px; height: 50px; margin: -25px 0 0 -25px; }
-}
-
 /* 小屏手机（窄竖屏）微调 */
 @media (max-width: 380px) {
   .stat { min-width: 54px; padding: 5px 8px; }
@@ -1074,4 +1060,180 @@ html, body {
   letter-spacing: 2px;
   min-height: 44px;
   margin-bottom: 4px;
+}
+
+/* ============================================================
+   横屏适配（仅手机横屏 / 矮屏横屏）
+   不是等比压缩，而是重新组织布局：
+   - 主菜单：标题独占一行，难度 vs 其他内容左右两列
+   - 设置：分组两列网格
+   - 胜利 / 排行榜 / 商店：限高 + 双列
+   - 游戏内 HUD：状态栏单行、四角控件缩尺寸但不移位
+   竖屏与高度 > 640 的横屏一律不进入本块。
+   ============================================================ */
+@media (orientation: landscape) and (max-height: 640px) {
+
+  /* 通用面板：限高、允许内部滚动 */
+  .screen { padding: calc(6px + var(--safe-t)) calc(6px + var(--safe-r))
+                     calc(6px + var(--safe-b)) calc(6px + var(--safe-l)); }
+  .panel {
+    max-width: min(96vw, 920px);
+    max-height: calc(100vh - 12px);
+    max-height: calc(100dvh - 12px);
+    /* 再扣掉上下安全区（刘海 / 小白条），保证面板不会比可用高度更高，
+       从而只出现「面板内部滚动」，不出现整页第二条滚动条 */
+    max-height: calc(100dvh - 12px - var(--safe-t) - var(--safe-b));
+    padding: 12px 18px;
+    border-radius: 16px;
+  }
+  .panel-narrow { max-width: min(92vw, 560px); }
+  .panel-title { font-size: 18px; margin-bottom: 8px; }
+
+  /* 主菜单：两列 */
+  .menu-panel { max-width: min(96vw, 940px); }
+  .menu-hero { text-align: center; }
+  .game-title { font-size: 26px; letter-spacing: 2px; margin-bottom: 2px; }
+  .subtitle { font-size: 12px; margin-bottom: 6px; }
+
+  .menu-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    column-gap: 24px;
+    align-items: start;
+  }
+  .menu-col > .section-label:first-child { margin-top: 4px; }
+  .section-label { margin: 4px 0; font-size: 12px; letter-spacing: .5px; }
+
+  .diff-list { gap: 8px; }
+  .diff-card { min-height: 52px; padding: 9px 13px; border-radius: 12px; }
+  .diff-card .diff-name { font-size: 15px; }
+  .diff-card .diff-desc { font-size: 11px; line-height: 1.45; }
+
+  /* 右列纵向再收一点：iOS 横屏（如 844×390）可用高度只有 ≈357px，
+     这样「开始游戏 / 设置」才不用滚动即可点到；触控热区仍保持 ≥36px */
+  .seed-row .text-input { padding: 8px 12px; font-size: 14px; }
+  .record-list { gap: 4px; }
+  .record-list li { padding: 4px 10px; font-size: 12.5px; }
+  .btn-row { margin-top: 6px; gap: 8px; }
+  .primary-btn, .secondary-btn { min-height: 44px; font-size: 15px; padding: 11px 16px; }
+  .mini-btn { min-height: 36px; padding: 7px 12px; }
+  .mini-btn.wide { margin-top: 4px; }
+  .achievements { margin-top: 8px; }
+  .achievements summary { padding: 6px 0; }
+  .hint-text { margin-top: 8px; font-size: 10.5px; line-height: 1.6; }
+
+  /* 设置面板：两列分组 */
+  .settings-panel { max-width: min(96vw, 900px); }
+  .settings-scroll {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 10px 14px;
+    align-items: start;
+    max-height: calc(100vh - 130px);
+    max-height: calc(100dvh - 130px);
+    /* 同样扣掉上下安全区，避免面板内出现双层滚动 */
+    max-height: calc(100dvh - 130px - var(--safe-t) - var(--safe-b));
+    padding-right: 2px;
+  }
+  .setting-group { margin-bottom: 0; padding: 10px; border-radius: 12px; }
+  .setting-group-title { margin-bottom: 6px; font-size: 12px; }
+  .setting-row { margin-bottom: 10px; }
+  .setting-row label { font-size: 13px; }
+  .switch { width: 48px; height: 28px; }
+  .switch::after { width: 22px; height: 22px; }
+  .switch:checked::after { transform: translateX(20px); }
+  .slider { height: 5px; }
+  .slider::-webkit-slider-thumb { width: 22px; height: 22px; }
+  .select-input { padding: 8px 10px; min-height: 38px; font-size: 13px; }
+
+  /* 胜利界面：统计双列 */
+  .win-title { font-size: 20px; margin-bottom: 8px; }
+  .win-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 10px; }
+  .win-stats li { padding: 8px 12px; font-size: 13px; }
+
+  /* 排行榜 */
+  .ranking-tabs { margin-bottom: 8px; }
+  .ranking-tab { padding: 8px 0; font-size: 13px; }
+  .ranking-list {
+    max-height: calc(100vh - 200px);
+    max-height: calc(100dvh - 200px);
+    max-height: calc(100dvh - 200px - var(--safe-t) - var(--safe-b));
+  }
+  .ranking-list li { padding: 6px 10px; }
+
+  /* 商店 */
+  .shop-balance { margin-bottom: 8px; font-size: 13px; }
+  .shop-balance b { font-size: 17px; }
+  .shop-list {
+    max-height: calc(100vh - 170px);
+    max-height: calc(100dvh - 170px);
+    max-height: calc(100dvh - 170px - var(--safe-t) - var(--safe-b));
+    gap: 8px;
+  }
+  .shop-card { padding: 9px 12px; gap: 8px; }
+  .shop-icon { width: 34px; font-size: 22px; }
+  .shop-name { font-size: 14px; }
+  .shop-desc { font-size: 11px; line-height: 1.4; }
+
+  /* 暂停菜单：4 个按钮 2×2，避免纵向过长 */
+  #pause-menu .menu-vertical {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+  }
+  #pause-menu .menu-vertical > button { min-height: 48px; }
+  #pause-menu .panel-narrow { max-width: min(90vw, 460px); }
+
+  /* 道具面板 / 幽灵 / 彩蛋：窄面板压缩 */
+  .item-panel-hint { margin-top: 8px; }
+  .ghost-msg { margin-bottom: 10px; line-height: 1.6; }
+
+  /* 游戏内 HUD：四角布局保持不变，只压缩尺寸 */
+  .hud-top {
+    top: calc(6px + var(--safe-t));
+    left: calc(6px + var(--safe-l));
+    right: calc(6px + var(--safe-r));
+  }
+  .hud-stats { flex-wrap: nowrap; gap: 5px; }
+  .stat { min-width: 52px; padding: 4px 8px; border-radius: 9px; }
+  .stat-label { font-size: 9px; letter-spacing: .5px; }
+  .stat-value { font-size: 13px; }
+
+  .hud-buttons { gap: 5px; }
+  .icon-btn { width: 40px; height: 40px; font-size: 17px; border-radius: 10px; }
+
+  .hud-right { top: calc(52px + var(--safe-t)); gap: 5px; }
+  .compass-ring { width: 42px; height: 42px; }
+  .compass-arrow { font-size: 16px; }
+  .compass-dist { font-size: 10px; }
+  .minimap-wrap { width: min(26vh, 132px); height: min(26vh, 132px); }
+  #minimap { border-radius: 12px; }
+
+  /* 极矮横屏（320 / 360 高）小地图缩小后，锁定占位文案与提示要能完整显示 */
+  .minimap-lock { padding: 4px; gap: 2px; border-radius: 12px; }
+  .minimap-lock-icon { font-size: 16px; }
+  .minimap-lock-text { font-size: 10.5px; letter-spacing: 0; }
+  .minimap-lock-hint { margin-top: 0; padding: 1px 5px; font-size: 9.5px; line-height: 1.35; }
+
+  .joystick {
+    width: 108px; height: 108px;
+    left: calc(12px + var(--safe-l));
+    bottom: calc(12px + var(--safe-b));
+  }
+  .joystick-knob { width: 50px; height: 50px; margin: -25px 0 0 -25px; }
+
+  .hud-bottom-right {
+    right: calc(12px + var(--safe-r));
+    bottom: calc(14px + var(--safe-b));
+    gap: 8px;
+  }
+  .action-btn { min-width: 112px; min-height: 48px; padding: 0 16px; font-size: 14px; border-radius: 13px; }
+
+  /* toast 抬高到摇杆 / 动作按钮之上并收窄，避免遮挡左下控件与右上小地图
+     （矮屏下 18% 会正好压在摇杆与动作按钮上） */
+  .toast { bottom: calc(40% + var(--safe-b)); max-width: 62vw; font-size: 13px; padding: 8px 14px; }
+
+  /* 回放控制条 */
+  .replay-bar { bottom: calc(10px + var(--safe-b)); padding: 6px 10px; gap: 6px; }
+  .replay-time { min-width: 96px; font-size: 12px; }
 }

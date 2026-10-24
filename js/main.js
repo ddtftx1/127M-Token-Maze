@@ -630,6 +630,8 @@
     if (Game.state !== 'paused') return;
     if (Game.itemPanelOpen) return; // 道具面板打开期间不恢复
     MG.UI.hidePause();
+    // 兜底：任何恢复路径都必须让 HUD 可见（避免经设置面板返回后 HUD 丢失）
+    MG.UI.show('hud');
     Game.state = 'playing';
     Game.clock.getDelta(); // 丢弃暂停期间累积时间
   }

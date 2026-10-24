@@ -148,6 +148,9 @@
   function closeSettings() {
     hide('settings-panel');
     if (settingsFrom === 'pause-menu') {
+      // 从暂停菜单进入设置 → 返回时先恢复 HUD，再由暂停菜单覆盖其上
+      // （showSettings 会隐藏 HUD，若不在此恢复，继续游戏后 HUD 将永久消失）
+      show('hud');
       show('pause-menu');
     } else if (settingsFrom === 'hud') {
       // 从游戏内 HUD 进入设置 → 返回游戏（需要通知主程序恢复运行）

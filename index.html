@@ -32,52 +32,62 @@
   <!-- ================= 主菜单 ================= -->
   <div id="main-menu" class="screen">
     <div class="panel menu-panel">
-      <h1 class="game-title">3D迷宫探险</h1>
-      <p class="subtitle">第一人称 3D 迷宫 · 自动寻路 · 每日挑战</p>
-
-      <!-- 难度选择 -->
-      <div class="section-label">选择难度</div>
-      <div class="diff-list" id="diff-list">
-        <button class="diff-card selected" data-diff="simple">
-          <span class="diff-name">简单</span>
-          <span class="diff-desc">迷宫较小，视野好，自动寻路不受距离限制，适合新手。</span>
-        </button>
-        <button class="diff-card" data-diff="medium">
-          <span class="diff-name">中等</span>
-          <span class="diff-desc">迷宫中等，有轻微迷雾，自动寻路单次限 25 格。</span>
-        </button>
-        <button class="diff-card" data-diff="hard">
-          <span class="diff-name">困难</span>
-          <span class="diff-desc">迷宫较大，迷雾较浓，自动寻路单次限 20 格，终点更远。</span>
-        </button>
+      <!-- 标题区（横屏下独占一行；竖屏/桌面与原来完全一致） -->
+      <div class="menu-hero">
+        <h1 class="game-title">3D迷宫探险</h1>
+        <p class="subtitle">第一人称 3D 迷宫 · 自动寻路 · 每日挑战</p>
       </div>
 
-      <!-- 随机种子 -->
-      <div class="section-label">迷宫种子（可留空随机）</div>
-      <div class="seed-row">
-        <input id="seed-input" class="text-input" type="text" placeholder="例如：hello-world" maxlength="24" />
-        <button id="btn-seed-random" class="mini-btn" title="随机种子">随机</button>
-        <button id="btn-seed-copy" class="mini-btn" title="复制种子">复制</button>
+      <!-- 列容器：默认 display: block（单列纵向，布局不变），仅手机横屏改为两列 -->
+      <div class="menu-grid">
+        <div class="menu-col">
+          <!-- 难度选择 -->
+          <div class="section-label">选择难度</div>
+          <div class="diff-list" id="diff-list">
+            <button class="diff-card selected" data-diff="simple">
+              <span class="diff-name">简单</span>
+              <span class="diff-desc">迷宫较小，视野好，自动寻路不受距离限制，适合新手。</span>
+            </button>
+            <button class="diff-card" data-diff="medium">
+              <span class="diff-name">中等</span>
+              <span class="diff-desc">迷宫中等，有轻微迷雾，自动寻路单次限 25 格。</span>
+            </button>
+            <button class="diff-card" data-diff="hard">
+              <span class="diff-name">困难</span>
+              <span class="diff-desc">迷宫较大，迷雾较浓，自动寻路单次限 20 格，终点更远。</span>
+            </button>
+          </div>
+        </div>
+
+        <div class="menu-col">
+          <!-- 随机种子 -->
+          <div class="section-label">迷宫种子（可留空随机）</div>
+          <div class="seed-row">
+            <input id="seed-input" class="text-input" type="text" placeholder="例如：hello-world" maxlength="24" />
+            <button id="btn-seed-random" class="mini-btn" title="随机种子">随机</button>
+            <button id="btn-seed-copy" class="mini-btn" title="复制种子">复制</button>
+          </div>
+          <button id="btn-daily" class="mini-btn wide">📅 每日挑战（世界同步种子）</button>
+
+          <!-- 最佳记录 -->
+          <div class="section-label">最佳记录</div>
+          <ul id="best-records" class="record-list"></ul>
+
+          <!-- 主按钮 -->
+          <div class="btn-row">
+            <button id="btn-start" class="primary-btn">开始游戏</button>
+            <button id="btn-settings-menu" class="secondary-btn">设置</button>
+          </div>
+          <button id="btn-ranking-menu" class="mini-btn wide">🏆 本地排行榜</button>
+          <button id="btn-shop" class="mini-btn wide">🏪 商店</button>
+
+          <!-- 成就 -->
+          <details class="achievements">
+            <summary>🏆 成就</summary>
+            <ul id="achievements-list" class="record-list"></ul>
+          </details>
+        </div>
       </div>
-      <button id="btn-daily" class="mini-btn wide">📅 每日挑战（世界同步种子）</button>
-
-      <!-- 最佳记录 -->
-      <div class="section-label">最佳记录</div>
-      <ul id="best-records" class="record-list"></ul>
-
-      <!-- 主按钮 -->
-      <div class="btn-row">
-        <button id="btn-start" class="primary-btn">开始游戏</button>
-        <button id="btn-settings-menu" class="secondary-btn">设置</button>
-      </div>
-      <button id="btn-ranking-menu" class="mini-btn wide">🏆 本地排行榜</button>
-      <button id="btn-shop" class="mini-btn wide">🏪 商店</button>
-
-      <!-- 成就 -->
-      <details class="achievements">
-        <summary>🏆 成就</summary>
-        <ul id="achievements-list" class="record-list"></ul>
-      </details>
 
       <p class="hint-text">
         手机：左下摇杆移动，空白处滑动转视角。<br />

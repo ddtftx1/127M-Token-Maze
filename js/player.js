@@ -116,9 +116,6 @@
     if (this.pitch < -this.maxPitch) this.pitch = -this.maxPitch;
   };
 
-  /** 直接设置朝向（如自动寻路时平滑转向） */
-  Player.prototype.setYaw = function (yaw) { this.yaw = yaw; };
-
   /** 把相机位置/朝向同步到 Three.js */
   Player.prototype.syncCamera = function () {
     var bob = Math.sin(this.bobPhase) * this.bobAmount * this._bobDamping;

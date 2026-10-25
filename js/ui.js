@@ -478,6 +478,15 @@
   }
 
   function refreshRanking() {
+    // 切换难度 / 重新打开时重置"清空"的二次确认状态，避免误删其它难度的数据
+    if (clearArmTimer) { clearTimeout(clearArmTimer); clearArmTimer = null; }
+    if (clearArmed) {
+      clearArmed = false;
+      if (el['btn-ranking-clear']) {
+        el['btn-ranking-clear'].textContent = '清空本难度';
+        el['btn-ranking-clear'].classList.remove('armed');
+      }
+    }
     // Tab 高亮
     if (el['ranking-tabs']) {
       var tabs = el['ranking-tabs'].querySelectorAll('.ranking-tab');
@@ -599,7 +608,7 @@
   function refreshShop() {
     if (!el['shop-list'] || !MG.Shop) return;
     var w = MG.Shop.getWallet();
-    if (el['shop-coins']) el['shop-coins'].textContent = w.coins;
+    if (el['shop-coins']) el['shop-coins'].textContent = formatNum(w.coins);
 
     var items = MG.Shop.ITEMS;
     var html = '';
@@ -771,15 +780,15 @@
 
     // 2) 输入框与按钮（松开瞬间的合成点击一律忽略）
     if (el['btn-secret-ok']) {
-      el['btn-secret-ok'].addEventListener('click', function () {
-        if (isSecretClickGuarded()) return;
+      el['btn-secret-ok'].addEventListener('click', function (e) {
+        if (e.detail === 0 && isSecretClickGuarded()) return;
         playClick();
         submitSecretAnswer();
       });
     }
     if (el['btn-secret-cancel']) {
-      el['btn-secret-cancel'].addEventListener('click', function () {
-        if (isSecretClickGuarded()) return;
+      el['btn-secret-cancel'].addEventListener('click', function (e) {
+        if (e.detail === 0 && isSecretClickGuarded()) return;
         playClick();
         closeSecretDialog();
       });
@@ -795,7 +804,7 @@
     if (el['secret-modal']) {
       el['secret-modal'].addEventListener('click', function (e) {
         if (e.target !== el['secret-modal']) return;
-        if (isSecretClickGuarded()) return; // 防止"松开"瞬间的合成点击把刚弹出的窗口关掉
+        if (e.detail === 0 && isSecretClickGuarded()) return; // 防止"松开"瞬间的合成点击把刚弹出的窗口关掉
         closeSecretDialog();
       });
     }
@@ -900,13 +909,11 @@
    */
   function showGhostDialog(info) {
     return new Promise(function (resolve) {
-      // 上一次弹窗若仍未处理（resolve 尚未被调用），先按"独自探险"收尾并清理 DOM：
-      // 否则 ghostResolve 被覆盖后旧 Promise 永久挂起，且旧弹窗残留会与新弹窗叠加
       if (ghostResolve) {
-        var prevResolve = ghostResolve;
-        ghostResolve = null;
-        hide('ghost-modal');
-        prevResolve({ choice: 'solo', remember: false });
+        // 当前流程下不应出现：由 main.js 的 _startPending 守卫保证串行
+        console.warn('[ui] showGhostDialog called while another is pending, ignoring');
+        resolve({ choice: 'solo', remember: false });
+        return;
       }
       ghostResolve = resolve;
       if (el['ghost-modal-info']) {
@@ -1117,7 +1124,7 @@
     }
     // 金币：本局拾取 / 钱包余额
     if (el['stat-coins']) el['stat-coins'].textContent = data.collectedCoins || 0;
-    if (el['stat-wallet']) el['stat-wallet'].textContent = (data.walletCoins || 0) + ' 💰';
+    if (el['stat-wallet']) el['stat-wallet'].textContent = formatNum(data.walletCoins || 0) + ' 💰';
 
     // 指南针
     if (el['compass-arrow']) {

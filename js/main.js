@@ -343,6 +343,8 @@
     Game.elapsed = 0;
     Game.usedAutoPath = false;
     Game.collectedCoins = 0;
+    Game._portalAccum = 0;
+    Game._hudAccum = 0;
 
     // 7.1) 小地图道具：每局重新寻找（拾取后才可使用小地图）
     Game.mapFound = false;
@@ -824,6 +826,7 @@
    * ---------------------------------------------------------- */
   function startReplay() {
     if (!MG.Replay || !Game.maze) return;
+    clearAchieveToastTimer();
     var frames = MG.Replay.load(Game.diffKey, Game.seed);
     if (!frames || frames.length < 2) {
       MG.UI.toast('没有可用的回放数据');

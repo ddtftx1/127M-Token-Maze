@@ -208,6 +208,9 @@
   function startGame(diffKey, seed, isDaily) {
     if (Game._startPending) return;
     Game._startPending = true;
+    // 清掉上一局残留的道具面板状态：R 键重开等路径不经过 closeItemPanel / backToMenu，
+    // 若不清零会让 pauseGame 的 itemPanelOpen 守卫永久拦截 HUD 暂停 / 设置按钮
+    Game.itemPanelOpen = false;
 
     var settings = MG.Settings.get();
     Game.diffKey = diffKey;
@@ -400,6 +403,9 @@
     MG.UI.el['stat-diff'].textContent = diff.name;
 
     Game.state = 'playing';
+    // 纵深防御：与 startGame 入口层的清理成对，保证"进入游戏状态"时
+    // itemPanelOpen 与 state 的不变量（面板打开 ⇔ state === 'paused'）成立
+    Game.itemPanelOpen = false;
     Game.clock.getDelta(); // 丢弃加载期间累积的时间
 
     MG.UI.toast('种子：' + Game.seed + '  难度：' + diff.name, 2200);

@@ -214,6 +214,12 @@
     }
   }
 
+  /** 设置面板当前是否可见（供 ESC / P 键判断是否需要优先关闭它，BUG-016） */
+  function isSettingsOpen() {
+    var node = el['settings-panel'];
+    return !!(node && !node.classList.contains('hidden'));
+  }
+
   /** 显示胜利界面 */
   function showWin(data) {
     hideAllScreens();
@@ -1696,6 +1702,7 @@
     setLoadingProgress: setLoadingProgress,
     showSettings: showSettings,
     closeSettings: closeSettings,
+    isSettingsOpen: isSettingsOpen,
     showWin: showWin,
     updateHud: updateHud,
     drawMinimap: drawMinimap,

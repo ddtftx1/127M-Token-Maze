@@ -747,6 +747,9 @@
     // 兜底：任何恢复路径都必须让 HUD 可见（避免经设置面板返回后 HUD 丢失）
     MG.UI.show('hud');
     Game.state = 'playing';
+    // 清空残留输入：中断（来电/切后台）时浏览器可能不补发 touchend，
+    // 摇杆的 moveX/moveY 会保持中断前的值，导致恢复后角色自己往前走（BUG-014）
+    if (Game.input && Game.input.resetInputs) Game.input.resetInputs();
     Game.clock.getDelta(); // 丢弃暂停期间累积时间
   }
 
@@ -1317,6 +1320,9 @@
     Game.input.onPause = function () {
       // 道具面板开启时：ESC / P 键优先关闭面板（不弹暂停菜单、不恢复）
       if (Game.itemPanelOpen) { closeItemPanel(); return; }
+      // 设置面板开启时：优先关闭它。否则 ESC 会走进下面的 resumeGame() 分支，
+      // 只把 state 切回 playing 而不隐藏面板，游戏会在面板背后继续跑（BUG-016）
+      if (MG.UI.isSettingsOpen && MG.UI.isSettingsOpen()) { MG.UI.closeSettings(); return; }
       if (Game.state === 'replay') exitReplay();
       else if (Game.state === 'playing') pauseGame();
       else if (Game.state === 'paused') resumeGame();
@@ -1376,6 +1382,9 @@
     // 6) 页面可见性变化自动暂停（移动端体验）
     document.addEventListener('visibilitychange', function () {
       if (document.hidden && Game.state === 'playing') {
+        // 切到后台的瞬间就清空输入状态：此时浏览器多半不会补发 touchend，
+        // 提前清理比等恢复时再清更可靠（BUG-013 / BUG-014）
+        if (Game.input && Game.input.resetInputs) Game.input.resetInputs();
         pauseGame();
       }
     });

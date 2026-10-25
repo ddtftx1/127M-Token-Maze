@@ -118,17 +118,32 @@
     this.joystickEl.addEventListener('touchcancel', joyEnd, { passive: false });
 
     /* ---------- 空白区域滑动转视角（触摸） ---------- */
+    /** 当前 _lookId 对应的手指是否已不在屏幕上（identifier 失效，需要重新接管） */
+    function lookOwnerGone(e) {
+      if (self._lookId === null) return true;
+      var all = e.touches || [];
+      for (var i = 0; i < all.length; i++) {
+        if (all[i].identifier === self._lookId) return false; // 仍在屏幕上
+      }
+      return true; // 已不在屏幕：identifier 失效（切后台 / 来电丢失 touchcancel 等）
+    }
+
     this.lookLayer.addEventListener('touchstart', function (e) {
       e.preventDefault();
       self._notifyFirstInput();
-      // 取第一个未被摇杆占用的手指
+      // 取第一个未被摇杆占用的手指。
+      // 关键：若已有 _lookId 但那只手指其实已不在屏幕上（切后台 / 来电未补发 touchcancel，
+      // 或先按下的手指抬起后另一只手指仍按着），必须允许本次触摸重新接管，
+      // 否则视角会长时间甚至永久无法转动（BUG-013）。
       for (var i = 0; i < e.changedTouches.length; i++) {
         var t = e.changedTouches[i];
-        if (self._lookId === null) {
+        if (t.identifier === self._joyId) continue; // 跳过被摇杆占用的手指
+        if (lookOwnerGone(e)) {
           self._lookId = t.identifier;
           self._lookLast.x = t.clientX;
           self._lookLast.y = t.clientY;
         }
+        break; // 只接管一根手指
       }
     }, { passive: false });
 
@@ -150,6 +165,19 @@
     function lookEnd(e) {
       for (var i = 0; i < e.changedTouches.length; i++) {
         if (e.changedTouches[i].identifier === self._lookId) self._lookId = null;
+      }
+      // 接管移交：负责转视角的手指抬起后，若屏幕上还有别的手指（例如先按 A 再按 B，
+      // 然后抬起 A），立刻把视角交给仍按着的那根，否则它会一直等到下次重新按下才生效。
+      // 只影响触摸路径；_lookLast 同步重置，避免移交瞬间产生一次跳变位移。
+      if (self._lookId === null) {
+        var rest = e.touches || [];
+        for (var j = 0; j < rest.length; j++) {
+          if (rest[j].identifier === self._joyId) continue; // 摇杆手指不参与转视角
+          self._lookId = rest[j].identifier;
+          self._lookLast.x = rest[j].clientX;
+          self._lookLast.y = rest[j].clientY;
+          break;
+        }
       }
     }
     this.lookLayer.addEventListener('touchend', lookEnd, { passive: false });
@@ -194,6 +222,9 @@
       self.moveX = 0;
       self.moveY = 0;
       self._joyId = null;
+      // _lookId 必须一并清理：否则切后台/来电后残留的 identifier 会让之后
+      // 所有新手指出于不匹配被忽略，表现为"能走但转不了头"（BUG-013）
+      self._lookId = null;
       self._resetKnob();
     });
 
@@ -288,6 +319,24 @@
   /** 手柄回中 */
   Input.prototype._resetKnob = function () {
     if (this.knobEl) this.knobEl.style.transform = 'translate(0px,0px)';
+  };
+
+  /**
+   * 清空全部输入状态（触摸中断 / 恢复游戏时调用）
+   * 背景：来电、下拉通知栏、切后台时浏览器可能不补发 touchend / touchcancel，
+   * 导致 moveX / moveY 保持中断前的值、_joyId / _lookId 指向已消失的手指。
+   * 若不清理，恢复后角色会"自己往前走"，或视角无法转动（BUG-013 / BUG-014）。
+   * 注意：只能在暂停 / 恢复 / 失焦等时机调用，不要在 playing 每帧调用，否则会吃掉摇杆输入。
+   */
+  Input.prototype.resetInputs = function () {
+    this.keys = {};
+    this.moveX = 0;
+    this.moveY = 0;
+    this._joyId = null;
+    this._lookId = null;
+    this.lookDX = 0;
+    this.lookDY = 0;
+    this._resetKnob();
   };
 
   /** 首次用户输入（用于音频解锁等） */

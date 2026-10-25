@@ -141,6 +141,19 @@
       prune();
       ok = safeSet(key, json);
     }
+    if (!ok) {
+      // 二次修剪后仍失败：激进修剪——保留条数减半（8 → 4），仍失败则继续减半（4 → 2 → 1）。
+      // 隐私模式 / 旧 Safari / 部分安卓 WebView 的配额可能只有 2MB，
+      // 8 局长回放放不下时必须让出空间，否则回放功能彻底不可用。
+      // 注意：prune(n) 在"现存条数 ≤ n"时不会删除任何东西，
+      // 所以必须逐级减半才能真正腾出空间（单次 prune(4) 在恰好 4 条时是空操作）。
+      var keep = Math.floor(MAX_REPLAYS / 2);
+      while (!ok && keep >= 1) {
+        prune(keep);
+        ok = safeSet(key, json);
+        keep = Math.floor(keep / 2);
+      }
+    }
     if (ok) {
       // 每次保存成功后都收敛一次，保证回放键数量始终 ≤ MAX_REPLAYS
       prune();
@@ -177,8 +190,13 @@
     }
   }
 
-  /** 清理最旧的回放，保持总条数不超过上限 */
-  function prune() {
+  /**
+   * 清理最旧的回放，保持总条数不超过上限
+   * @param {number} [keep] 本次保留条数（默认 MAX_REPLAYS）；
+   *   配额紧张时传更小的值做"激进修剪"，按 savedAt 排序删除最旧的
+   */
+  function prune(keep) {
+    var limit = (typeof keep === 'number' && keep > 0) ? keep : MAX_REPLAYS;
     try {
       var keys = [];
       var i;
@@ -186,7 +204,7 @@
         var k = global.localStorage.key(i);
         if (k && k.indexOf(PREFIX) === 0) keys.push(k);
       }
-      if (keys.length <= MAX_REPLAYS) return;
+      if (keys.length <= limit) return;
       var items = [];
       for (i = 0; i < keys.length; i++) {
         var savedAt = 0;
@@ -197,7 +215,7 @@
         items.push({ key: keys[i], savedAt: savedAt });
       }
       items.sort(function (a, b) { return a.savedAt - b.savedAt; });
-      var removeCount = items.length - MAX_REPLAYS;
+      var removeCount = items.length - limit;
       for (i = 0; i < removeCount; i++) {
         try { global.localStorage.removeItem(items[i].key); } catch (e) { /* 忽略 */ }
       }

@@ -49,6 +49,50 @@
   Object.defineProperty(MinHeap.prototype, 'size', {
     get: function () { return this._items.length; }
   });
+  /** 清空堆（供 A* 工作区复用时重置开放集，避免每次 new MinHeap） */
+  MinHeap.prototype.clear = function () {
+    this._items.length = 0;
+  };
+
+  /* ------------------------------------------------------------
+   * A* 工作区复用
+   * 困难难度"最佳路径"会连续做 ~66 次 A*，每次都重新分配 3 个
+   * size×size 的 TypedArray + 一个 MinHeap（合计约 800KB 临时垃圾），
+   * 极易触发 GC 造成 100~300ms 卡顿。
+   * 这里在模块级复用这批数组，用 generation（版本号）代替 fill() 清零：
+   *   - _gen++ 后，凡是 _genMap[i] !== _gen 的格子都视为"未访问"
+   *   - 逻辑清零是 O(1)，不再每次遍历整张表
+   * ---------------------------------------------------------- */
+  var _astarGen = 0;        // 当前 generation（版本号）
+  var _astarSize = -1;      // 工作区对应的迷宫边长（size 变化时重建一次）
+  var _genMap = null;       // Uint32Array：每格最后一次被清零时的 generation
+  var _gScore = null;       // Float32Array：g 值（有效前提：_genMap[i] === _astarGen）
+  var _cameFrom = null;     // Int32Array：来源格索引
+  var _closed = null;       // Uint8Array：是否已确定（有效前提同上）
+  var _openHeap = null;     // 复用的最小堆
+
+  /** 确保 A* 工作区与迷宫 size 匹配（仅在 size 变化时重建一次） */
+  function ensureAStarPool(size) {
+    if (_astarSize === size && _genMap && _gScore && _cameFrom && _closed && _openHeap) return;
+    var total = size * size;
+    _genMap = new Uint32Array(total);
+    _gScore = new Float32Array(total);
+    _cameFrom = new Int32Array(total);
+    _closed = new Uint8Array(total);
+    _openHeap = new MinHeap();
+    _astarGen = 0;
+    _astarSize = size;
+  }
+
+  /** 取下一个 generation；极端溢出时整体重置一次（实际不会发生） */
+  function nextAStarGen() {
+    _astarGen++;
+    if (_astarGen > 0xFFFFFFF0) {
+      _genMap.fill(0);
+      _astarGen = 1;
+    }
+    return _astarGen;
+  }
 
   /* ------------------------------------------------------------
    * A*（A-Star）寻路
@@ -60,30 +104,37 @@
    * ---------------------------------------------------------- */
   function aStar(maze, start, goal) {
     var size = maze.size;
-    var total = size * size;
 
     if (!isWalkable(maze, start.x, start.y) || !isWalkable(maze, goal.x, goal.y)) return null;
 
-    var gScore = new Float32Array(total).fill(Infinity);
-    var cameFrom = new Int32Array(total).fill(-1);
-    var closed = new Uint8Array(total);
+    // 复用模块级工作区（只在 size 变化时重建）；用 generation 做 O(1) 逻辑清零
+    ensureAStarPool(size);
+    var gen = nextAStarGen();
+    var genMap = _genMap, gScore = _gScore, cameFrom = _cameFrom, closed = _closed;
+    var open = _openHeap;
+    open.clear();
 
     var si = start.y * size + start.x;
     var gi = goal.y * size + goal.x;
+    // 起点的"有效化"：标 generation 并赋 g=0（无需 fill(Infinity)）
+    genMap[si] = gen;
     gScore[si] = 0;
+    cameFrom[si] = -1;
+    closed[si] = 0;
 
     // 开放集：二叉最小堆（懒删除）——避免数组"线性找最小 + indexOf"的开销
-    var open = new MinHeap();
     open.push(si, heuristic(start.x, start.y, goal.x, goal.y));
 
     var DIRS = [[0, -1], [1, 0], [0, 1], [-1, 0]];
 
     while (open.size > 0) {
       var current = open.pop();
-      if (closed[current]) continue; // 懒删除：跳过已确定的过期条目
+      // 懒删除：跳过已确定的过期条目（closed 仅在 genMap 有效时才可靠）
+      if (genMap[current] === gen && closed[current]) continue;
       if (current === gi) {
         return reconstruct(cameFrom, current, size);
       }
+      genMap[current] = gen;
       closed[current] = 1;
       var cx = current % size;
       var cy = (current - cx) / size;
@@ -95,7 +146,15 @@
         if (!isWalkable(maze, nx, ny)) continue;
 
         var ni = ny * size + nx;
-        if (closed[ni]) continue;
+        // 已在本 generation 确定过的格子跳过；未在本 generation 出现过的格子
+        // 视为"未访问"，其 closed / gScore 都是上一轮的陈旧值，必须先重置
+        if (genMap[ni] === gen && closed[ni]) continue;
+        if (genMap[ni] !== gen) {
+          genMap[ni] = gen;
+          closed[ni] = 0;
+          gScore[ni] = Infinity;
+          cameFrom[ni] = -1;
+        }
 
         var tentative = gScore[current] + 1;
         if (tentative < gScore[ni]) {

@@ -336,7 +336,24 @@ if (farCell) {
     var pool = collect(true, MIN_DIST);
     if (pool.length === 0) pool = collect(false, MIN_DIST);
     if (pool.length === 0) pool = collect(false, 4); // 极端兜底：仍尽量远离起点
-    if (pool.length === 0) return null;
+    if (pool.length === 0) {
+      // 终极兜底：三层都空时，遍历**所有**通路格（含边界），
+      // 取离起点曼哈顿距离最远的那一个（排除起点/终点）。
+      // 迷宫极小或通路极窄时也不会让这局缺少地图卷轴（否则玩家永远无法解锁小地图）。
+      var best = null;
+      var bestDist = -1;
+      for (var fy = 0; fy < size; fy++) {
+        for (var fx = 0; fx < size; fx++) {
+          if (maze.grid[fy * size + fx] !== 0) continue;
+          if (fx === start.x && fy === start.y) continue;
+          if (end && fx === end.x && fy === end.y) continue;
+          var fd = Math.abs(fx - start.x) + Math.abs(fy - start.y);
+          if (fd > bestDist) { bestDist = fd; best = { x: fx, y: fy }; }
+        }
+      }
+      // 迷宫除起点/终点外确实没有任何通路格时才为 null（生成器保证不会出现）
+      return best;
+    }
     return pool[Math.floor(rng() * pool.length)];
   }
 

@@ -21,6 +21,41 @@
   var mapCtx = null;
   var mapSize = 200;
 
+  /**
+   * 小地图离屏缓存：相对静态内容（背景 / 已探索通路 / 已探索墙 / 金币 / 起点）
+   * 画一次后整张贴到主画布，每帧只重绘动态元素（玩家 / 终点呼吸光 / 寻路路径 / 边框）。
+   * 困难难度 31×31 = 961 格 × 2 次遍历，原先每 120ms 全量重扫一遍，低端机掉帧。
+   */
+  var mapCacheCanvas = null;
+  var mapCacheCtx = null;
+  var mapCacheDpr = 1;
+  /** 缓存有效性标记：置 false 后下一次 drawMinimap 会重绘缓存 */
+  var mapCacheDirty = true;
+  /** 上次重绘缓存时的玩家格子坐标 */
+  var mapCacheCellX = -1;
+  var mapCacheCellY = -1;
+  /** 上次重绘缓存时的探索标记数量（变化说明新区域被探索） */
+  var mapCacheExploredCount = -1;
+  /** 上次重绘缓存时的静态内容签名（难度/主题/色盲/金币设置变化时失效） */
+  var mapCacheSignature = '';
+
+  /** 强制小地图缓存在下一次绘制时重绘（主题 / 色盲 / 金币设置 / 重新开局时调用） */
+  function invalidateMinimapCache() {
+    mapCacheDirty = true;
+  }
+
+  /**
+   * 重置小地图缓存状态（每局开始时调用）
+   * 清空"上次格坐标 / 探索计数 / 签名"，避免上一局的统计与签名让新一局误判为"缓存有效"
+   */
+  function resetMinimapCache() {
+    mapCacheDirty = true;
+    mapCacheCellX = -1;
+    mapCacheCellY = -1;
+    mapCacheExploredCount = -1;
+    mapCacheSignature = '';
+  }
+
   /** 计时器状态 */
   var clockEl = null;
 
@@ -72,6 +107,15 @@
       el['minimap'].height = Math.round(mapSize * dpr);
       mapCtx = el['minimap'].getContext('2d');
       mapCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+      // 离屏缓存画布：尺寸与主小地图一致（含 DPR），同样用 setTransform 做逻辑像素映射
+      mapCacheDpr = dpr;
+      mapCacheCanvas = document.createElement('canvas');
+      mapCacheCanvas.width = Math.round(mapSize * dpr);
+      mapCacheCanvas.height = Math.round(mapSize * dpr);
+      mapCacheCtx = mapCacheCanvas.getContext('2d');
+      mapCacheCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      mapCacheDirty = true;
     }
 
     clockEl = { t: 0 };
@@ -883,6 +927,10 @@
    * 幽灵询问弹窗（返回 Promise）
    * ---------------------------------------------------------- */
   var ghostResolve = null;
+  /** 幽灵弹窗超时定时器（15 秒无操作自动按"独自探险"继续） */
+  var ghostTimeoutTimer = null;
+  /** 幽灵弹窗无操作超时时间（毫秒）；仅作兜底，不打扰玩家 */
+  var GHOST_TIMEOUT_MS = 15000;
 
   function bindGhostModal() {
     if (el['btn-ghost-yes']) {
@@ -929,6 +977,15 @@
       }
       if (el['ghost-remember']) el['ghost-remember'].checked = false;
       show('ghost-modal');
+      // 超时兜底：玩家不操作（切后台 / 拖走弹窗）时也要让主流程继续，
+      // 否则 Promise 永远 pending，main.js 的 _startPending 永久为 true，
+      // 之后所有 startGame 会被静默拦截，玩家必须刷新页面
+      if (ghostTimeoutTimer) clearTimeout(ghostTimeoutTimer);
+      ghostTimeoutTimer = setTimeout(function () {
+        ghostTimeoutTimer = null;
+        // 超时静默按"独自探险"关闭，不弹 toast 打扰玩家
+        closeGhostDialog({ choice: 'solo', remember: false });
+      }, GHOST_TIMEOUT_MS);
     });
   }
 
@@ -946,6 +1003,11 @@
   /** 内部：关闭弹窗并回传结果（无待决弹窗时为空操作） */
   function closeGhostDialog(result) {
     if (!ghostResolve) return;
+    // 无论何种方式关闭（玩家选择 / 点背景 / ESC / 超时），都清理超时定时器避免残留
+    if (ghostTimeoutTimer) {
+      clearTimeout(ghostTimeoutTimer);
+      ghostTimeoutTimer = null;
+    }
     var fn = ghostResolve;
     hide('ghost-modal');   // 先清理 DOM，再清空待决状态，最后回传结果
     ghostResolve = null;
@@ -981,8 +1043,13 @@
         el['minimap-lock-hint'].classList.add('hidden');
       }
     }
-    // 未拾取时清空画布，避免残留上一局内容
-    if (locked && mapCtx) mapCtx.clearRect(0, 0, mapSize, mapSize);
+    // 未拾取时清空画布，避免残留上一局内容（缓存同步失效，避免贴回旧图）
+    if (locked && mapCtx) {
+      mapCtx.setTransform(1, 0, 0, 1, 0, 0);
+      mapCtx.clearRect(0, 0, mapSize * mapCacheDpr, mapSize * mapCacheDpr);
+      mapCtx.setTransform(mapCacheDpr, 0, 0, mapCacheDpr, 0, 0);
+      invalidateMinimapCache();
+    }
     applyMinimapSettingLock();
     // 距离信息随"是否解锁小地图"同步显示 / 隐藏
     applyDistanceVisibility(!locked);
@@ -1060,6 +1127,8 @@
     if (!input) return;
     input.addEventListener('change', function () {
       S.set(key, input.checked);
+      // 小地图相关开关会影响静态内容（如金币轮廓 / 显隐），立即失效缓存
+      invalidateMinimapCache();
       playClick();
     });
   }
@@ -1069,6 +1138,8 @@
     if (!input) return;
     input.addEventListener('change', function () {
       S.set(key, input.value);
+      // 主题切换会改变配色，小地图缓存需重绘（色盲开关同理由 bindSwitch 处理）
+      invalidateMinimapCache();
       playClick();
     });
   }
@@ -1115,6 +1186,8 @@
     document.body.dataset.theme = s.theme || 'tech';
     if (s.colorblind) document.body.dataset.colorblind = '1';
     else delete document.body.dataset.colorblind;
+    // 主题 / 色盲配色变化会影响小地图静态内容，立即失效缓存
+    invalidateMinimapCache();
   }
 
   /* ------------------------------------------------------------
@@ -1209,35 +1282,41 @@
   /* ------------------------------------------------------------
    * 小地图绘制
    * ---------------------------------------------------------- */
-  function drawMinimap(player, maze, mazeView, settings) {
-    if (!mapCtx || !settings.minimap) return;
-    // 未找到地图道具前不绘制内容（占位由 updateMinimapLock 负责）
-    if (MG.game && !MG.game.mapFound) return;
+
+  /**
+   * 绘制小地图的"相对静态"内容到离屏缓存：
+   * 背景 + 已探索通路 + 已探索墙 + 金币 + 起点
+   * （终点呼吸光 / 玩家 / 寻路路径 / 边框属于动态内容，由 drawMinimap 每次绘制）
+   */
+  function drawMinimapStatic(player, maze, mazeView, settings) {
+    var ctx = mapCacheCtx;
+    if (!ctx) return;
     var cb = !!settings.colorblind; // 色盲友好模式：颜色 + 形状双编码
     var size = maze.size;
     var cellPx = mapSize / size;
 
-    mapCtx.clearRect(0, 0, mapSize, mapSize);
+    ctx.setTransform(mapCacheDpr, 0, 0, mapCacheDpr, 0, 0);
+    ctx.clearRect(0, 0, mapSize, mapSize);
     // 背景
-    mapCtx.fillStyle = 'rgba(6,10,18,0.85)';
-    mapCtx.fillRect(0, 0, mapSize, mapSize);
+    ctx.fillStyle = 'rgba(6,10,18,0.85)';
+    ctx.fillRect(0, 0, mapSize, mapSize);
 
     // 已探索通路
-    mapCtx.fillStyle = 'rgba(60,110,160,0.45)';
+    ctx.fillStyle = 'rgba(60,110,160,0.45)';
     for (var y = 0; y < size; y++) {
       for (var x = 0; x < size; x++) {
         if (maze.grid[y * size + x] === 0 && player.explored[y * size + x]) {
-          mapCtx.fillRect(x * cellPx, y * cellPx, cellPx + 0.6, cellPx + 0.6);
+          ctx.fillRect(x * cellPx, y * cellPx, cellPx + 0.6, cellPx + 0.6);
         }
       }
     }
 
     // 探索到的墙体（用稍亮的颜色画出边界感）
-    mapCtx.fillStyle = 'rgba(120,180,240,0.18)';
+    ctx.fillStyle = 'rgba(120,180,240,0.18)';
     for (var wy = 0; wy < size; wy++) {
       for (var wx = 0; wx < size; wx++) {
         if (maze.grid[wy * size + wx] === 1 && player.explored[wy * size + wx]) {
-          mapCtx.fillRect(wx * cellPx, wy * cellPx, cellPx + 0.6, cellPx + 0.6);
+          ctx.fillRect(wx * cellPx, wy * cellPx, cellPx + 0.6, cellPx + 0.6);
         }
       }
     }
@@ -1258,26 +1337,26 @@
         if (coinSeen) {
           if (cb) {
             // 色盲：橙色方块（□），与圆形起点/三角玩家形状区分
-            mapCtx.fillStyle = '#ff9f40';
-            mapCtx.fillRect(coinCx - coinR, coinCy - coinR, coinR * 2, coinR * 2);
+            ctx.fillStyle = '#ff9f40';
+            ctx.fillRect(coinCx - coinR, coinCy - coinR, coinR * 2, coinR * 2);
           } else {
-            mapCtx.fillStyle = '#ffd24a';
-            mapCtx.beginPath();
-            mapCtx.arc(coinCx, coinCy, coinR, 0, Math.PI * 2);
-            mapCtx.fill();
+            ctx.fillStyle = '#ffd24a';
+            ctx.beginPath();
+            ctx.arc(coinCx, coinCy, coinR, 0, Math.PI * 2);
+            ctx.fill();
           }
         } else {
           // 未探索：只描轮廓不填充，视觉弱化
           if (cb) {
-            mapCtx.strokeStyle = 'rgba(255,159,64,0.55)';
-            mapCtx.lineWidth = Math.max(1, cellPx * 0.16);
-            mapCtx.strokeRect(coinCx - coinR, coinCy - coinR, coinR * 2, coinR * 2);
+            ctx.strokeStyle = 'rgba(255,159,64,0.55)';
+            ctx.lineWidth = Math.max(1, cellPx * 0.16);
+            ctx.strokeRect(coinCx - coinR, coinCy - coinR, coinR * 2, coinR * 2);
           } else {
-            mapCtx.strokeStyle = 'rgba(255,210,74,0.45)';
-            mapCtx.lineWidth = Math.max(1, cellPx * 0.16);
-            mapCtx.beginPath();
-            mapCtx.arc(coinCx, coinCy, coinR, 0, Math.PI * 2);
-            mapCtx.stroke();
+            ctx.strokeStyle = 'rgba(255,210,74,0.45)';
+            ctx.lineWidth = Math.max(1, cellPx * 0.16);
+            ctx.beginPath();
+            ctx.arc(coinCx, coinCy, coinR, 0, Math.PI * 2);
+            ctx.stroke();
           }
         }
       }
@@ -1289,14 +1368,68 @@
     if (cb) {
       // 色盲：蓝色实心方块（■）
       var sr = Math.max(2.5, cellPx * 0.35);
-      mapCtx.fillStyle = '#4ea1ff';
-      mapCtx.fillRect(startPx - sr, startPy - sr, sr * 2, sr * 2);
+      ctx.fillStyle = '#4ea1ff';
+      ctx.fillRect(startPx - sr, startPy - sr, sr * 2, sr * 2);
     } else {
-      mapCtx.fillStyle = '#44ff88';
-      mapCtx.beginPath();
-      mapCtx.arc(startPx, startPy, Math.max(2.5, cellPx * 0.35), 0, Math.PI * 2);
-      mapCtx.fill();
+      ctx.fillStyle = '#44ff88';
+      ctx.beginPath();
+      ctx.arc(startPx, startPy, Math.max(2.5, cellPx * 0.35), 0, Math.PI * 2);
+      ctx.fill();
     }
+  }
+
+  /** 统计已探索格子数（用于判断缓存是否需要因"探索到新区域"而失效） */
+  function countExplored(explored, total) {
+    var n = 0;
+    for (var i = 0; i < total; i++) {
+      if (explored[i]) n++;
+    }
+    return n;
+  }
+
+  function drawMinimap(player, maze, mazeView, settings) {
+    if (!mapCtx || !settings.minimap) return;
+    // 未找到地图道具前不绘制内容（占位由 updateMinimapLock 负责）
+    if (MG.game && !MG.game.mapFound) return;
+    var cb = !!settings.colorblind; // 色盲友好模式：颜色 + 形状双编码
+    var size = maze.size;
+    var cellPx = mapSize / size;
+
+    /* ---------- 1) 缓存失效判定 ---------- */
+    var pgd = player.getGrid();
+    var exploredCount = countExplored(player.explored, size * size);
+    // 静态内容签名：难度（size）/ 主题配色 / 色盲模式 / 金币显示设置 任一变化都要重绘缓存
+    var signature = size + '|' + (settings.theme || '') + '|' + (cb ? 1 : 0) + '|' +
+      (settings.minimapCoins ? 1 : 0) + '|' + mapSize;
+    if (signature !== mapCacheSignature) {
+      mapCacheSignature = signature;
+      mapCacheDirty = true;
+    }
+    // 玩家跨格移动 或 探索标记数量变化 → 缓存需要重绘
+    if (pgd.x !== mapCacheCellX || pgd.y !== mapCacheCellY ||
+        exploredCount !== mapCacheExploredCount) {
+      mapCacheDirty = true;
+    }
+
+    /* ---------- 2) 必要时重绘缓存 ---------- */
+    if (mapCacheDirty || !mapCacheCanvas) {
+      drawMinimapStatic(player, maze, mazeView, settings);
+      mapCacheDirty = false;
+      mapCacheCellX = pgd.x;
+      mapCacheCellY = pgd.y;
+      mapCacheExploredCount = exploredCount;
+    }
+
+    /* ---------- 3) 缓存整张贴到主画布（一次 drawImage） ---------- */
+    mapCtx.setTransform(1, 0, 0, 1, 0, 0);
+    mapCtx.clearRect(0, 0, mapCacheCanvas.width, mapCacheCanvas.height);
+    if (mapCacheCanvas) {
+      mapCtx.drawImage(mapCacheCanvas, 0, 0);
+    }
+    // 之后的动态绘制回到逻辑像素坐标系
+    mapCtx.setTransform(mapCacheDpr, 0, 0, mapCacheDpr, 0, 0);
+
+    /* ---------- 4) 动态元素 ---------- */
 
     // 终点（普通：紫色脉动圆；色盲：蓝色十字 ✕）
     // performance.now 现代浏览器全支持；对老 X5 内核兜底用 Date.now（脉动相位不同但观感一致）
@@ -1322,10 +1455,9 @@
       mapCtx.fill();
     }
 
-    // 玩家（三角，指示朝向）
-    var pg = player.getGrid();
-    var px = pg.x * cellPx + cellPx / 2;
-    var py = pg.y * cellPx + cellPx / 2;
+    // 玩家（三角，指示朝向）—— 复用上面缓存失效判定时已算出的当前格
+    var px = pgd.x * cellPx + cellPx / 2;
+    var py = pgd.y * cellPx + cellPx / 2;
     mapCtx.save();
     mapCtx.translate(px, py);
     // yaw=0 时朝向 -Z（地图上方），换算成 canvas 角度
@@ -1580,6 +1712,7 @@
     applyThemeToBody: applyThemeToBody,
     // 小地图锁定 / 排行榜 / 回放
     updateMinimapLock: updateMinimapLock,
+    resetMinimapCache: resetMinimapCache,
     refreshRanking: refreshRanking,
     openRanking: openRanking,
     openAchievements: openAchievements,

@@ -242,8 +242,8 @@
     }
 
     if (hasGhost && ghostMode === 'ask') {
-      // 弹窗询问：玩家必须主动选择后才继续
-      //（点击背景遮罩 / 按 ESC 视为"独自探险"，都属于明确的用户意志，不再做超时自动选择）
+      // 弹窗询问：玩家主动选择后继续
+      //（点击背景遮罩 / 按 ESC / 15 秒无操作超时，均视为"独自探险"）
       var meta = MG.Replay.loadFull(diffKey, Game.seed);
       var ghostPrompt = MG.UI.showGhostDialog({
         diffName: Game.diff.name,
@@ -251,16 +251,29 @@
           ? meta.time
           : (ghostFrames[ghostFrames.length - 1][3] || 0)
       });
-      // 先注册"释放守卫"：弹窗无论以何种方式结束（玩家选择 / 被其它流程关闭），
-      // 都不能让 _startPending 永久为 true，否则之后所有 startGame 会被静默吞掉
-      ghostPrompt.then(releaseStartPending, releaseStartPending);
-      ghostPrompt.then(function (res) {
-        if (res.remember) {
-          // 记住选择：写入设置（总是启用 / 从不启用）
-          MG.Settings.set('ghostMode', res.choice === 'ghost' ? 'always' : 'never');
+      // finally 语义：无论 resolve / reject / 回调内部抛错，都必须先释放守卫，
+      // 否则 _startPending 永久为 true，之后所有 startGame 会被静默吞掉
+      ghostPrompt.then(
+        function (res) {
+          try {
+            if (res.remember) {
+              // 记住选择：写入设置（总是启用 / 从不启用）
+              MG.Settings.set('ghostMode', res.choice === 'ghost' ? 'always' : 'never');
+            }
+            proceed(res.choice === 'ghost');
+          } finally {
+            releaseStartPending();
+          }
+        },
+        function () {
+          // reject 分支：按"独自探险"继续，保证主流程不卡死
+          try {
+            proceed(false);
+          } finally {
+            releaseStartPending();
+          }
         }
-        proceed(res.choice === 'ghost');
-      });
+      );
       return;
     }
 
@@ -351,6 +364,8 @@
     // 7.1) 小地图道具：每局重新寻找（拾取后才可使用小地图）
     Game.mapFound = false;
     Game.mapHint = '';
+    // 小地图离屏缓存按局重置（探索标记 / 玩家格 / 签名全部作废）
+    MG.UI.resetMinimapCache();
     var mItem = Game.mazeView.mapItem;
     if (mItem && diff.key === 'simple') {
       var mdx = mItem.x - maze.start.x;

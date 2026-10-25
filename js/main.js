@@ -324,13 +324,15 @@
             if (MG.Audio) MG.Audio.coin();
           }
         }
+        var kindAtStop = p.autoStoppedKind;
         p.autoStoppedKind = null;
         // 距离限制到点：光带已同步消失，仅轻提示（非阻塞）
-        MG.UI.toast(
-          '已走完本次限制距离（' + (p.autoLimit || 0) + '格）' +
-          (picked > 0 ? '，顺手拾取 +' + picked + '金币' : '，可再次使用道具'),
-          2600
-        );
+        // best → 提示可再用道具继续拾取；fast → 提示寻路结束（fast 现已不限程，保留兜底文案）
+        var stopMsg = (kindAtStop === 'fast')
+          ? '自动寻路结束'
+          : '最佳路径已走完本次距离上限，可再次使用道具继续' +
+            (picked > 0 ? '（顺手拾取 +' + picked + ' 金币）' : '');
+        MG.UI.toast(stopMsg, 2600);
       } else if (p && p.autoReachedEnd) {
         // 正常到达终点：静默处理，由胜利界面接管提示（避免双 toast 叠加）
         p.autoReachedEnd = false;
@@ -472,10 +474,16 @@
    * 自动寻路（由道具触发：最佳路径 / 最快路径）
    * ---------------------------------------------------------- */
 
-  /** 难度对应的单次寻路距离限制（格）；null = 不限制 */
-  function autoPathCellLimit() {
-    if (Game.diffKey === 'medium') return 25;
-    if (Game.diffKey === 'hard') return 20;
+  /**
+   * 难度 / 寻路类型对应的单次寻路距离限制（格）；null = 不限制
+   * - 最快路径（fast）：不限（本来就是直奔终点）
+   * - 最佳路径（best）：中途要绕去捡金币，中/困难限程，可多次使用道具续走
+   * @param {'best'|'fast'} kind 寻路类型
+   */
+  function autoPathCellLimit(kind) {
+    if (kind === 'fast') return null;
+    if (Game.diffKey === 'medium') return 60;
+    if (Game.diffKey === 'hard') return 50;
     return null; // simple：完整走完
   }
 
@@ -506,7 +514,7 @@
       return false;
     }
 
-    var limit = autoPathCellLimit();
+    var limit = autoPathCellLimit(kind);
     var ok = player.startAutoPath(path, {
       kind: kind,
       limit: limit,
@@ -517,11 +525,16 @@
     Game.usedAutoPath = true;
     if (MG.Audio) MG.Audio.pathStart();
     var name = kind === 'best' ? '🧭 最佳路径' : '⚡ 最快路径';
-    MG.UI.toast(name + '启动' + (limit ? '（本次限 ' + limit + ' 格）' : ''), 2200);
+    MG.UI.toast(name + '启动' + (limit && kind === 'best' ? '（本次限 ' + limit + ' 格）' : ''), 2200);
     return true;
   }
 
-  /** 生成"最佳路径"：沿最短路径前进 + 顺路拾取附近的金币与地图卷轴 */
+  /**
+   * 生成"最佳路径"：先捡完本局所有未拾取目标（金币 + 地图卷轴），最后才冲终点
+   * 核心技巧：拾取阶段把终点格临时封为墙，A* 天然绕开终点（避免提前通关）
+   * - 某金币必须踩过终点才能捡 → 不可达，自动放弃（踩终点就赢了，实际也捡不到）
+   * - 绕开终点也能到 → A* 走那条更长的绕路
+   */
   function buildBestPath(player) {
     var maze = Game.maze;
     var cell = MG.Maze.CELL;
@@ -538,11 +551,7 @@
       gx = near.x; gy = near.y;
     }
 
-    // 1) 基础最短路径
-    var base = MG.Path.aStar(maze, { x: gx, y: gy }, maze.end);
-    if (!base) return null;
-
-    // 2) 顺路收集目标：未拾取的金币 + 未发现的地图卷轴
+    // 1) 收集目标：未拾取的金币 + 未发现的地图卷轴
     var targets = [];
     var view = Game.mazeView;
     if (view) {
@@ -557,19 +566,52 @@
       }
     }
 
-    // 3) 筛选"顺路"目标（按真实行走距离），并作为"保护点"防止被路径简化裁掉
-    // 阈值 4 步（原 6 步）：往返最坏 8 步，仍能保证"最佳路径"长度不超过最快路径太多，
-    // 避免为了捡远处金币绕出大回环
-    var maxDetour = 4; // 真实步数阈值：≤4 步才值得顺路绕行
-    var accepted = MG.Path.findCollectTargets(maze, base, targets, { maxDetour: maxDetour });
-    var protectedSet = {};
-    for (var a = 0; a < accepted.length; a++) {
-      protectedSet[accepted[a].y * maze.size + accepted[a].x] = 1;
+    // 2) 无目标 → 退化为直接去终点（保持旧行为）
+    var startCell = { x: gx, y: gy };
+    if (targets.length === 0) {
+      return MG.Path.findWorldPath(maze, player.pos, cell, 'astar');
     }
 
-    // 4) 插入绕行段 → 简化（保护收集点）→ 世界坐标
-    var collected = MG.Path.buildCollectPath(maze, base, targets, { maxDetour: maxDetour });
-    var simple = MG.Path.simplify(maze, collected, protectedSet);
+    // 3) 拾取阶段：临时把终点封为墙，让 A* 绕开终点
+    var size = maze.size;
+    var endIdx = maze.end.y * size + maze.end.x;
+    var savedEnd = maze.grid[endIdx];
+    var collectPath = null;
+    try {
+      maze.grid[endIdx] = 1;
+      collectPath = MG.Path.buildGreedyCollectPath(maze, startCell, targets);
+    } finally {
+      maze.grid[endIdx] = savedEnd; // 无论如何都要还原，避免污染迷宫数据
+    }
+
+    // 4) 全部不可达 → 退化为直接去终点
+    if (!collectPath || collectPath.length === 0) {
+      return MG.Path.findWorldPath(maze, player.pos, cell, 'astar');
+    }
+
+    // 5) 拾取结束后从最后一个目标冲终点
+    var last = collectPath[collectPath.length - 1];
+    var full;
+    if (last.x === maze.end.x && last.y === maze.end.y) {
+      full = collectPath; // 最后一个目标就是终点格（极端情况），无需拼接
+    } else {
+      var tail = MG.Path.aStar(maze, { x: last.x, y: last.y }, maze.end);
+      if (!tail) {
+        // 尾部不可达（异常情况）：退化为直接去终点
+        return MG.Path.findWorldPath(maze, player.pos, cell, 'astar');
+      }
+      full = collectPath.concat(tail.slice(1));
+    }
+
+    // 6) 终点必须保留为途经点，防止被简化裁掉
+    var protectedSet = {};
+    protectedSet[endIdx] = 1;
+    // 各拾取目标同样保护，保证光带真的穿过它们
+    for (var t = 0; t < targets.length; t++) {
+      protectedSet[targets[t].y * size + targets[t].x] = 1;
+    }
+
+    var simple = MG.Path.simplify(maze, full, protectedSet);
     var world = MG.Path.toWorldPath(simple, maze, cell, cell * 0.34);
     if (world.length > 0) world[0] = { x: player.pos.x, z: player.pos.z };
     return world;
@@ -913,12 +955,35 @@
     // 相机：跟随幽灵（第三人称）或全景俯视
     var cam = Game.camera;
     if (Game.replayView === 'follow') {
-      cam.position.set(
-        pose.x + Math.sin(pose.yaw) * 3.4,
-        2.7,
-        pose.z + Math.cos(pose.yaw) * 3.4
+      // 参数：固定高度 4.5m（高于所有难度墙高，困难 3.5m），距离 5.0m，
+      // 注视点 1.6m（幽灵上半身），避免幽灵跑出画面下缘
+      var camDist = 5.0;
+      var camHeight = 4.5;
+      var lookHeight = 1.6;
+      // 从幽灵胸口（1.5m）朝相机位置的射线：若被墙体挡住，沿射线拉近相机作为兜底，
+      // 防止困难难度窄巷道里相机埋进 3.5m 高的墙（画面变黑）
+      var origin = new THREE.Vector3(pose.x, 1.5, pose.z);
+      var targetCam = new THREE.Vector3(
+        pose.x + Math.sin(pose.yaw) * camDist,
+        camHeight,
+        pose.z + Math.cos(pose.yaw) * camDist
       );
-      cam.lookAt(pose.x, 1.15, pose.z);
+      var toCam = targetCam.clone().sub(origin);
+      var maxDist = toCam.length();
+      toCam.normalize();
+
+      var raycaster = new THREE.Raycaster(origin, toCam, 0, maxDist);
+      if (Game.mazeView && Game.mazeView.walls) {
+        var hits = raycaster.intersectObject(Game.mazeView.walls);
+        if (hits.length > 0) {
+          var safeDist = Math.max(1.0, hits[0].distance - 0.3);
+          cam.position.copy(origin).addScaledVector(toCam, safeDist);
+          cam.lookAt(pose.x, lookHeight, pose.z);
+          return; // 提前结束本次跟随相机的定位
+        }
+      }
+      cam.position.copy(targetCam);
+      cam.lookAt(pose.x, lookHeight, pose.z);
     } else {
       var half = Game.mazeView ? Game.mazeView.worldHalf : 30;
       var h = Math.max(20, half * 1.7);

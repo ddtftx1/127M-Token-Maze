@@ -608,7 +608,10 @@
   function refreshShop() {
     if (!el['shop-list'] || !MG.Shop) return;
     var w = MG.Shop.getWallet();
-    if (el['shop-coins']) el['shop-coins'].textContent = formatNum(w.coins);
+    if (el['shop-coins']) {
+      // 与 HUD 钱包一致：超 1e8 用紧凑格式兜底，防止商店头部金额溢出
+      el['shop-coins'].textContent = w.coins >= 1e8 ? formatCompactNum(w.coins) : formatNum(w.coins);
+    }
 
     var items = MG.Shop.ITEMS;
     var html = '';
@@ -619,7 +622,10 @@
       var canAfford = w.coins >= it.price;
       var btnCls = 'mini-btn shop-buy-btn' + (!maxed && !canAfford ? ' poor' : '');
       // 数量达到/超过上限时只显示实际数量（彩蛋奖励可累积超过上限，避免显示"179 / 99"的溢出感）
-      var ownedText = maxed ? ('已购 ' + owned) : ('已购 ' + owned + ' / ' + it.limit);
+      // 超大数量用紧凑格式（10w+ 时显示为 "已购 12.3w / 99"），防止卡片撑破
+      var ownedText = maxed
+        ? ('已购 ' + formatCompactNum(owned))
+        : ('已购 ' + formatCompactNum(owned) + ' / ' + it.limit);
       html += '<div class="shop-card">' +
         '<div class="shop-icon">' + it.icon + '</div>' +
         '<div class="shop-info">' +
@@ -863,7 +869,7 @@
       html += '<li class="item-row">' +
         '<span class="item-icon">' + it.icon + '</span>' +
         '<span class="item-name">' + (it.short || it.name) + '</span>' +
-        '<span class="item-count">×' + n + '</span>' +
+        '<span class="item-count">×' + formatCompactNum(n) + '</span>' +
         '<button class="mini-btn item-use-btn" data-use-id="' + it.id + '">使用</button>' +
       '</li>';
     }
@@ -1124,12 +1130,18 @@
     }
     // 金币：本局拾取 / 钱包余额
     if (el['stat-coins']) el['stat-coins'].textContent = data.collectedCoins || 0;
-    if (el['stat-wallet']) el['stat-wallet'].textContent = formatNum(data.walletCoins || 0) + ' 💰';
+    // 钱包余额：普通金额保留千分位（更直观），超过 1e8 时用紧凑格式兜底防溢出
+    if (el['stat-wallet']) {
+      var wc = data.walletCoins || 0;
+      el['stat-wallet'].textContent = (wc >= 1e8 ? formatCompactNum(wc) : formatNum(wc)) + ' 💰';
+    }
 
     // 指南针
     if (el['compass-arrow']) {
+      // yaw 增大 = 向左转（forward = (-sin yaw, 0, -cos yaw)），
+      // 相对偏角为正说明终点在左侧，CSS 旋转需逆时针 → 符号取反
       var deg = data.compassAngle * 180 / Math.PI;
-      el['compass-arrow'].style.transform = 'rotate(' + deg + 'deg)';
+      el['compass-arrow'].style.transform = 'rotate(' + (-deg) + 'deg)';
     }
     if (el['compass-dist']) {
       el['compass-dist'].textContent = data.gridDist >= 0 ? data.gridDist + '格' : '—';
@@ -1184,7 +1196,8 @@
       } else {
         btn.classList.remove('hidden');
         var n = data.itemTotal || 0;
-        btn.textContent = n > 0 ? '🎒道具 ×' + n : '🎒道具';
+        // 超大数量（彩蛋奖励可累积到 10w+）用紧凑格式，避免按钮文字溢出
+        btn.textContent = n > 0 ? '🎒道具 ×' + formatCompactNum(n) : '🎒道具';
       }
     }
     if (cancel) {
@@ -1286,7 +1299,10 @@
     }
 
     // 终点（普通：紫色脉动圆；色盲：蓝色十字 ✕）
-    var pulse = 0.6 + Math.sin(performance.now() / 320) * 0.4;
+    // performance.now 现代浏览器全支持；对老 X5 内核兜底用 Date.now（脉动相位不同但观感一致）
+    var now = (typeof performance !== 'undefined' && performance.now)
+      ? performance.now() : Date.now();
+    var pulse = 0.6 + Math.sin(now / 320) * 0.4;
     var endPx = maze.end.x * cellPx + cellPx / 2;
     var endPy = maze.end.y * cellPx + cellPx / 2;
     var endR = Math.max(3, cellPx * 0.45);
@@ -1439,18 +1455,38 @@
   /* ------------------------------------------------------------
    * 工具
    * ---------------------------------------------------------- */
+  /**
+   * 时间格式化：<60s → "12.3s"；<1h → "3m 5.2s"；≥1h → "1h 6m"
+   * 超长局（挂机 / 调试注入超大 elapsed）不再撑破版面
+   */
   function formatTime(seconds) {
     if (typeof seconds !== 'number' || !isFinite(seconds)) return '—';
     var s = Math.floor(seconds * 10) / 10;
     if (s < 60) return s.toFixed(1) + 's';
-    var m = Math.floor(s / 60);
-    var r = (s - m * 60).toFixed(1);
-    return m + 'm ' + r + 's';
+    if (s < 3600) {
+      var m = Math.floor(s / 60);
+      return m + 'm ' + (s - m * 60).toFixed(1) + 's';
+    }
+    var h = Math.floor(s / 3600);
+    var mm = Math.floor((s - h * 3600) / 60);
+    return h + 'h ' + mm + 'm';
   }
 
   /** 数字千分位格式化：99999 → "99,999" */
   function formatNum(n) {
     return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  }
+
+  /**
+   * 超大数字紧凑格式化（防止溢出 HUD / 商店卡片 / 道具面板）
+   * 999 → "999"；1234 → "1.2k"；12345 → "1.2w"；123456789 → "1.2亿"
+   */
+  function formatCompactNum(n) {
+    n = Number(n) || 0;
+    if (n < 1000) return String(n);
+    if (n < 10000) return (n / 1000).toFixed(1) + 'k';
+    if (n < 1e8) return (n / 10000).toFixed(1) + 'w';
+    return (n / 1e8).toFixed(1) + '亿';
   }
 
   function closestWithClass(node, cls) {
@@ -1488,7 +1524,8 @@
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;')
-      .replace(/"/g, '\x26quot;')
+      // 用具名实体 &quot; 等价于 \x26quot;（\x26 = &），可读性更好
+      .replace(/"/g, '&quot;')
       .replace(/'/g, '&#39;');
   }
 
@@ -1535,6 +1572,8 @@
     toast: toast,
     toggleFullscreen: toggleFullscreen,
     formatTime: formatTime,
+    formatNum: formatNum,
+    formatCompactNum: formatCompactNum,
     getSelectedDiff: getSelectedDiff,
     setSelectedDiff: setSelectedDiff,
     setSeed: setSeed,

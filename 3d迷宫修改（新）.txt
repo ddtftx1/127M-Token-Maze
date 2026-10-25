@@ -1,0 +1,153 @@
+# 任务背景
+
+你正在维护一个纯前端 3D 迷宫游戏（Three.js），代码由 AI 编写。项目模块化良好：
+- js/maze.js：迷宫生成 + 3D 场景构建（含 mapItem 地图卷轴）
+- js/pathfinding.js：A* / BFS / 路径平滑
+- js/player.js：玩家控制器
+- js/replay.js：回放录制与存储
+- js/ui.js：所有界面（含 drawMinimap 小地图绘制、showGhostDialog 幽灵弹窗）
+- js/main.js：主循环 + 状态机（含 buildBestPath 最佳路径、startGame 幽灵弹窗流程）
+- js/settings.js、js/shop.js、js/audio.js、js/input.js、js/ranking.js
+
+代码风格：ES5 语法（var / function），IIFE 模块，命名空间挂在 window.MG 上。请保持现有风格，不要引入 ES6+ 语法。
+
+# 修复目标（共 5 个问题，按优先级排列）
+
+## 【优先级 1】地图卷轴可能这局不存在
+
+**位置**：js/maze.js → pickMapSpot()
+
+**现象**：该函数要求地图卷轴放在"离起点曼哈顿距离 ≥ 8 步"的通路格上，避开起点/终点/金币格。函数有 3 层兜底：①排除金币格 + ≥8 步；②允许金币格 + ≥8 步；③允许金币格 + ≥4 步。极端情况下 3 层都找不到候选，返回 null。调用方 MazeView.build() 里 `if (mapSpot)` 判空，所以不会崩，但这局永远不会生成地图卷轴，玩家永远无法解锁小地图。
+
+**修复要求**：
+- 在现有 3 层兜底之后再加一层：遍历所有通路格（排除起点、终点），取离起点曼哈顿距离最远的那一个作为 mapSpot 返回。
+- 保证该函数**永不返回 null**（除非迷宫完全没有任何通路格，这是不可能的情况）。
+- 不要改变前 3 层兜底的逻辑和优先级，只在最后加一层。
+
+**验证方法**：构造一个"起点附近没有 ≥4 步通路格"的迷宫（可以通过临时把 size 调小、或手动改种子测试），确认这局仍然能生成地图卷轴。
+
+---
+
+## 【优先级 2】幽灵弹窗缺少 15 秒超时兜底
+
+**位置**：js/ui.js → showGhostDialog()、closeGhostDialog()；js/main.js → startGame() 中的幽灵弹窗分支
+
+**现象**：startGame() 里，当有同难度同种子的历史回放、且 settings.ghostMode === 'ask' 时，会弹出"要不要召唤幽灵"弹窗。玩家必须主动选择（点按钮 / 点背景 / 按 ESC）才会继续。若玩家不操作（切后台、拖走弹窗等），Promise 永远 pending，`Game._startPending` 永远为 true，之后所有 startGame 调用会被 `if (Game._startPending) return;` 静默拦截，玩家必须刷新页面才能恢复。
+
+**修复要求**：
+1. 在 ui.js 的 showGhostDialog() 内部增加 15 秒超时：超时后自动以 `{ choice: 'solo', remember: false }`（独自探险）关闭弹窗，让游戏继续。超时不需要弹 toast 打扰玩家。
+2. 在 closeGhostDialog() 内部清理该定时器（clearTimeout），确保玩家正常选择时定时器不会残留。
+3. 在 main.js 的幽灵弹窗 then 回调里，把 `releaseStartPending()` 的调用改到 finally 里（或至少在 reject 分支也调用 proceed(false)），保证 Promise 无论 resolve / reject / 内部异常，_startPending 都能被释放。
+4. 不要改变现有的"点击背景遮罩 / 按 ESC 视为独自探险"的行为。
+
+**验证方法**：
+- 正常选择"幽灵对战" / "独自探险" → 行为不变，15 秒后不会再有弹窗。
+- 打开弹窗后不操作，15 秒后自动以"独自探险"继续。
+- 打开弹窗后，手动测试让 Promise reject（例如临时注释掉 resolve 逻辑），确认 _startPending 被释放、后续能再次开始游戏。
+
+---
+
+## 【优先级 3】小地图每 120ms 全量重绘
+
+**位置**：js/ui.js → drawMinimap()
+
+**现象**：该函数每 120ms 被 main.js 主循环调用一次，每次都从头遍历 maze.size × maze.size 个格子（困难难度 31×31 = 961 个格子，遍历两次：通路一次、墙一次），重绘"已探索通路 / 已探索墙 / 金币 / 起点 / 终点 / 玩家 / 寻路路径 / 边框"。其中"探索通路、探索墙、金币、起点、终点"这些是相对静态的内容，只有"玩家位置/朝向、终点呼吸光、寻路路径"每帧会变。低端手机上会掉帧。
+
+**修复要求**：
+1. 引入一个离屏缓存画布（OffscreenCanvas 或 document.createElement('canvas')），尺寸与主小地图画布一致（考虑 devicePixelRatio）。
+2. 缓存内容包含：背景色、已探索通路、已探索墙、金币、起点、终点（不含终点呼吸光，因为终点有脉动动画）。
+3. 判断是否需要重绘缓存：维护一个"上次重绘缓存时的玩家格子坐标 + 探索标记数量"，当玩家跨格移动、或探索标记数量变化时，才重绘缓存。颜色主题切换 / 色盲模式切换 / minimapCoins 设置变化时也要重绘缓存。
+4. 每次主循环调用 drawMinimap 时：
+   - 若缓存需要更新 → 先重绘缓存
+   - 把缓存整张贴到主画布（一次 drawImage）
+   - 只绘制动态元素：玩家三角、终点呼吸光、自动寻路路径、边框
+5. 保持现有色盲友好模式（cb = true 时）的所有绘制细节不变：金币方块、起点方块、终点 ✕、玩家三角白描边 + 白色小箭头。
+6. 保持 minimapCoins 设置的所有行为不变：已探索金币实心、未探索金币轮廓。
+7. 保持"未找到地图道具前不绘制"的早期 return 逻辑。
+
+**验证方法**：
+- 简单/中等/困难难度下，小地图显示内容与修改前完全一致。
+- 切换主题、切换色盲模式、切换 minimapCoins 设置后，小地图立即刷新。
+- 玩家移动、拾取金币、找到地图卷轴、自动寻路时，小地图正确更新。
+- 长时间游玩（比如 3 分钟），小地图不卡顿、不闪烁、不残留旧内容。
+
+---
+
+## 【优先级 4】回放存储可能撑爆浏览器配额
+
+**位置**：js/replay.js → save()
+
+**现象**：MAX_REPLAYS = 8、MAX_FRAMES = 9000，单局回放约 200KB，8 局 ≈ 1.7MB。浏览器 localStorage 一般 5MB，但隐私模式 / 旧 Safari / 部分安卓 WebView 可能只给 2MB。代码已有"存不下 → prune() 删最旧 → 重试一次"的兜底，但如果 8 局都是近期保存的、prune 也只能删到 MAX_REPLAYS 条，仍可能失败。
+
+**修复要求**：
+1. 保持现有的"保存前 prune → 失败后 prune 再重试一次"逻辑不变。
+2. 在"第二次 prune 后仍失败"的情况下，增加一次"激进修剪"：把保留条数从 MAX_REPLAYS 减半（即保留最近 4 条），删除超出部分后再次尝试保存。如果仍失败，才走现有的"toast 提示回放保存失败"。
+3. 修剪逻辑要复用现有的 prune() 思路（按 savedAt 排序，删除最旧的），只是保留条数动态调整。
+4. 不要改变 MAX_FRAMES、SAMPLE_INTERVAL 等参数，不要改变压缩帧格式，不要影响幽灵对战和回放功能。
+
+**验证方法**：
+- 正常保存回放 → 行为不变。
+- 模拟配额紧张（可用浏览器 DevTools 的 Storage 面板手动塞数据）→ 确认激进修剪能腾出空间保存，或至少给出清晰的 toast 提示。
+
+---
+
+## 【优先级 5·最低】自动寻路"最佳路径"在困难难度下短卡
+
+**位置**：js/pathfinding.js → aStar()；js/main.js → buildBestPath()；js/pathfinding.js → buildGreedyCollectPath()
+
+**现象**：困难难度最多 11 个目标（10 金币 + 1 地图），buildGreedyCollectPath 会做约 N(N+1)/2 = 66 次 A*。每次 A* 都新建 3 个 size×size 的数组（gScore / cameFrom / closed）和一个 MinHeap，困难难度每次约 10~13 KB 临时分配，66 次约 800KB，集中在几十~几百毫秒内发生，触发 GC，造成 100~300ms 卡顿。
+
+**修复要求（保守方案，最小改动）**：
+1. 只做"数组复用"这一件事：在 pathfinding.js 模块级别维护 3 个复用的 TypedArray（gScore / cameFrom / closed）和一个复用的 MinHeap 实例，每次 A* 开始时用"generation 版本号"清零（而不是 fill(Infinity) / fill(-1)）。
+2. 具体做法：
+   - 模块级维护 `var _gen = 0;` 和一个 `var _genMap = null;`（Uint32Array，标记每个格子最后一次被"清零"的 generation）
+   - 每次 aStar() 开始时 `_gen++`，需要清零时把 `_genMap[idx] = _gen`
+   - 判断"未访问"：`_genMap[idx] !== _gen`
+   - gScore / cameFrom / closed 三个数组按 size 复用（size 不变时不用重建；size 变化时重建一次）
+3. 不要改动 A* 的算法逻辑、启发式函数、路径还原顺序。
+4. 不要改动 buildGreedyCollectPath 的贪心策略。
+5. 不要引入"BFS 距离图"等新算法——本次只做数组复用，保持改动最小。
+
+**验证方法**：
+- 简单/中等/困难难度下，"最佳路径"和"最快路径"生成的路线与修改前完全一致（可对比同一种子、同一位置的路线光带）。
+- 困难难度点击"最佳路径"时，主观感受卡顿减轻。
+- 连续使用多次"最佳路径"（比如中途取消后再用），路线始终正确。
+
+---
+
+# 禁止事项（非常重要）
+
+1. **不要碰彩蛋相关代码**：js/ui.js 里的 bindSecretDialog、SECRET_ANSWERS、SECRET_HOLD_MS、openSecretDialog、closeSecretDialog、submitSecretAnswer、isSecretClickGuarded、bindLongPress（针对 btn-shop 和 shop-title 的部分）；js/shop.js 里的 claimSecretGift、claimSecretItemGift、SECRET_GIFT_COINS、SECRET_GIFT_ITEM_COUNT。这些未来会删除或改造，现在不要动。
+2. **不要碰调试设施**：js/main.js 里的 console.info / console.warn 日志、MG.boot / MG.Game 等导出到 window 的调试入口、README 里的开发叙事内容。
+3. **不要改动以下已确认无问题的模块**：js/audio.js、js/input.js、js/ranking.js、js/settings.js、js/shop.js（除彩蛋相关）、js/style.css。
+4. **不要改变以下现有行为**：
+   - 点击背景遮罩 / 按 ESC 关闭幽灵弹窗 = 独自探险
+   - 未找到地图道具前不绘制小地图
+   - 色盲友好模式下的所有绘制细节（金币方块、起点方块、终点 ✕、玩家三角描边）
+   - minimapCoins 设置下未探索金币用轮廓显示
+   - 幽灵弹窗的"记住我的选择"功能
+   - 回放的压缩帧格式、采样间隔、MAX_FRAMES 参数
+   - 自动寻路的路线结果
+5. **不要引入新依赖**，不要使用 ES6+ 语法（let / const / 箭头函数 / async-await / class），保持 ES5 风格。
+6. **不要顺手"优化"没有要求你改的代码**。如果你发现其他问题，在回复里列出来，但不要动。
+
+# 输出要求
+
+1. 按优先级顺序逐个修复（优先级 1 最重要，5 最次要）。
+2. 每修完一个，用一段话说明：
+   - 改了哪个文件、哪个函数
+   - 改了什么
+   - 为什么这么改
+3. 如果某个修复遇到困难（比如发现我的描述和实际代码有出入），**先停下来告诉我**，不要擅自改变修复方向。
+4. 全部修完后，列出"修改文件清单"，方便我 review。
+5. 不要输出完整文件内容，只输出 diff 或改动片段即可。
+
+# 验证清单（修完后请自检）
+
+- [ ] 这局迷宫一定能生成地图卷轴（在 pickMapSpot 最后一层兜底返回最远通路格）
+- [ ] 幽灵弹窗 15 秒后自动按独自探险继续，且正常选择时定时器被清理
+- [ ] 幽灵弹窗 Promise reject 时 _startPending 被释放
+- [ ] 小地图在三种难度、三种主题、色盲开/关、minimapCoins 开/关下显示正确
+- [ ] 小地图在玩家移动、拾取金币、找到地图卷轴、自动寻路时正确更新
+- [ ] 回放在正常配额下保存成功；在紧张配额下能激进修剪或清晰提示
+- [ ] 自动寻路路线与修改前一致，困难难度卡顿减轻

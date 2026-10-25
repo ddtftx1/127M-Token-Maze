@@ -425,10 +425,22 @@ html, body {
   justify-content: center;
   backdrop-filter: blur(6px);
 }
+/* 指南针指针：容器负责旋转（轴心严格居中），内层三角负责形状 */
 .compass-arrow {
-  font-size: 20px;
-  color: var(--accent-2);
+  width: 14px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transform-origin: 50% 50%;
   transition: transform 0.08s linear;
+  color: var(--accent-2);
+}
+.compass-needle {
+  width: 10px;
+  height: 17px;
+  background: currentColor;
+  clip-path: polygon(50% 0%, 0% 100%, 100% 100%);
 }
 .compass-dist {
   font-size: 11px;
@@ -1208,7 +1220,9 @@ html, body {
 
   .hud-right { top: calc(52px + var(--safe-t)); gap: 5px; }
   .compass-ring { width: 42px; height: 42px; }
-  .compass-arrow { font-size: 16px; }
+  /* 小屏按比例缩小指针（保持 1:1.7 比例，确保旋转重心不偏移） */
+  .compass-arrow { width: 11px; height: 16px; }
+  .compass-needle { width: 8px; height: 13.5px; }
   .compass-dist { font-size: 10px; }
   .minimap-wrap { width: min(26vh, 132px); height: min(26vh, 132px); }
   #minimap { border-radius: 12px; }

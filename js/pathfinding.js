@@ -511,6 +511,41 @@
     return result.slice(0, entry).concat(segment, result.slice(bestJ + 1));
   }
 
+  /**
+   * 贪心最近邻拾取：从 start 出发，依次 A* 到最近的未拾取目标，直到走完全部可达目标
+   * 调用方需保证：调用时终点格已被临时封为墙（grid=1），A* 天然绕开终点
+   * @param {Object} maze 迷宫数据
+   * @param {{x:number,y:number}} start 起点网格坐标
+   * @param {Array<{x:number,y:number}>} targets 待拾取目标网格坐标
+   * @returns {Array<{x,y}>|null} 网格路径（含起点、不含终点），全不可达返回 null
+   */
+  function buildGreedyCollectPath(maze, start, targets) {
+    if (!targets || targets.length === 0) return null;
+    var remaining = targets.slice();
+    var current = { x: start.x, y: start.y };
+    var fullPath = [{ x: current.x, y: current.y }];
+    var guard = targets.length + 1;
+
+    while (remaining.length > 0 && guard-- > 0) {
+      var best = null, bestLen = Infinity, bestPath = null;
+      for (var i = 0; i < remaining.length; i++) {
+        var t = remaining[i];
+        var p = aStar(maze, current, t);
+        if (!p) continue;
+        if (p.length < bestLen) {
+          bestLen = p.length;
+          best = t;
+          bestPath = p;
+        }
+      }
+      if (!best) break;
+      fullPath = fullPath.concat(bestPath.slice(1));
+      current = { x: best.x, y: best.y };
+      remaining.splice(remaining.indexOf(best), 1);
+    }
+    return fullPath.length > 1 ? fullPath : null;
+  }
+
   MG.Path = {
     aStar: aStar,
     bfs: bfs,
@@ -523,7 +558,8 @@
     nearestWalkable: nearestWalkable,
     bfsDistMap: bfsDistMap,
     buildCollectPath: buildCollectPath,
-    findCollectTargets: findCollectTargets
+    findCollectTargets: findCollectTargets,
+    buildGreedyCollectPath: buildGreedyCollectPath
   };
 
 })(window);

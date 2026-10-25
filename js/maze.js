@@ -26,8 +26,8 @@
       wallHeight: 2.5,
       fogDensity: 0.00054,   // 很淡的雾（整体降低 40%，提升可见度）
       fogColorHex: 0x0a1420,
-      autoPathMax: Infinity, // 自动寻路无限次
-      autoPathCooldown: 5,   // 冷却很短
+      autoPathMax: Infinity, // 预留，当前未使用（自动寻路无限次）
+      autoPathCooldown: 5,   // 预留，当前未使用（冷却很短）
       farCell: false,        // 终点距离策略：false=对角，true=额外更远
       coins: 3,
       ceiling: true,
@@ -39,8 +39,8 @@
       wallHeight: 3.0,
       fogDensity: 0.012,     // 降低 40%，提升可见度
       fogColorHex: 0x081018,
-      autoPathMax: 3,
-      autoPathCooldown: 30,
+      autoPathMax: 3,        // 预留，当前未使用
+      autoPathCooldown: 30,  // 预留，当前未使用
       farCell: true,
       coins: 6,
       ceiling: true,
@@ -52,8 +52,8 @@
       wallHeight: 3.5,
       fogDensity: 0.0252,    // 雾较浓（整体降低 40%）
       fogColorHex: 0x040a12,
-      autoPathMax: 1,
-      autoPathCooldown: 60,
+      autoPathMax: 1,        // 预留，当前未使用
+      autoPathCooldown: 60,  // 预留，当前未使用
       farCell: true,
       coins: 10,
       ceiling: true,
@@ -852,7 +852,6 @@ if (farCell) {
 
   /** 销毁场景对象，释放 GPU 资源 */
   MazeView.prototype.dispose = function () {
-    var self = this;
     this.group.traverse(function (obj) {
       if (obj.geometry) obj.geometry.dispose();
       if (obj.material) {

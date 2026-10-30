@@ -35,7 +35,9 @@
     usedAutoPath: false,  // 本局是否用过自动寻路
     collectedCoins: 0,
     isDaily: false,
-    mapFound: false,      // 本局是否已找到小地图道具
+    // 本局小地图是否已解锁。注意：拾取地图卷轴只把 mapUnlock 放进背包，
+    // 必须由玩家在道具面板里主动使用后才置 true（2026-10-30 设计变更）
+    mapFound: false,
     mapHint: '',          // 简单难度的地图方位提示（其他难度为空）
     recorder: null,       // 回放记录器
     ghost: null,          // 幽灵模型（上一次同难度+同种子的挑战）
@@ -365,7 +367,7 @@
     Game._portalAccum = 0;
     Game._hudAccum = 0;
 
-    // 7.1) 小地图道具：每局重新寻找（拾取后才可使用小地图）
+    // 7.1) 小地图道具：每局重新寻找（拾取只进背包，玩家在道具面板主动使用后才解锁小地图）
     Game.mapFound = false;
     Game.mapHint = '';
     // 小地图离屏缓存按局重置（探索标记 / 玩家格 / 签名全部作废）
@@ -1118,13 +1120,27 @@
           MG.UI.toast('+' + got + ' 金币（' + Game.collectedCoins + '/' + Game.mazeView.totalCoins + '）', 1000);
         }
 
-        // 6.5) 地图道具拾取（解锁小地图）
+        /* 6.5) 地图道具拾取：只进背包，不直接解锁小地图
+         *
+         * 设计变更（2026-10-30）：拾取 = mapUnlock 库存 +1，解锁动作交给玩家在道具面板里主动执行，
+         * 走 useItem('mapUnlock') 那条既有分支。因此这里**不设置** Game.mapFound：
+         *   - 小地图锁定占位继续显示（ui.js updateMinimapLock 的 locked 分支）；
+         *   - HUD 距离信息、指南针距离继续隐藏（updateHud 里 applyDistanceVisibility(mapFound)）；
+         *   - 小地图不绘制（drawMinimap 里 !mapFound 直接 return）。
+         * 库存与商店购买的 mapUnlock 共用同一份钱包，面板数量是合并后的值。 */
         if (!Game.mapFound && Game.mazeView.tryCollectMap(Game.player.pos.x, Game.player.pos.z, 1.2)) {
-          Game.mapFound = true;
+          var mapItemAdded = !!(MG.Shop && MG.Shop.addItem && MG.Shop.addItem('mapUnlock', 1));
+          if (!mapItemAdded) console.warn('[game] 地图道具入库失败（钱包不可写），本局仍按已拾取处理');
+
           if (MG.Audio) MG.Audio.mapFound();
-          MG.UI.toast('已找到迷宫地图，小地图已解锁', 2600);
-          MG.UI.updateMinimapLock(false, Game.mapHint);
-          updateHudData(); // 距离信息立即恢复显示
+          MG.UI.toast('已获得地图道具，可在道具面板中使用', 2600);
+
+          // 方位提示已失效：道具被拿走了，留着"地图在东侧"只会误导玩家。
+          // 小地图仍是锁定状态，这里只把提示行清空（中等/困难本来就没有提示，不受影响）。
+          Game.mapHint = '';
+          MG.UI.updateMinimapLock(true, Game.mapHint);
+
+          updateHudData(); // 库存数变了：刷新 HUD 的道具数量与钱包
         }
       }
 

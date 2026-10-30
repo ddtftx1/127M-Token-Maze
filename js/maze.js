@@ -382,7 +382,9 @@ if (farCell) {
     this.group.name = 'mazeRoot';
     this.walls = null;
     this.coins = [];       // {mesh, x, y, collected}
-    this.mapItem = null;   // 迷宫地图道具 {group, board, glow, ring, x, y, world, collected}
+    // 迷宫地图道具 {group, board, glow, ring, x, y, world, collected}
+    // 自转作用在整个 group 上：卷轴杆与地图板作为一体旋转（BUG-021，见 update()）
+    this.mapItem = null;
     this.particles = null; // 终点粒子
     this.time = 0;
     this.build();
@@ -597,7 +599,7 @@ if (farCell) {
     }
     this.totalCoins = this.coins.length;
 
-    /* ---------- 迷宫地图道具（每局 1 个，拾取后解锁小地图） ---------- */
+    /* ---------- 迷宫地图道具（每局 1 个，拾取后 mapUnlock 进背包，由玩家在道具面板使用后解锁小地图） ---------- */
     var mapSpot = pickMapSpot(maze, maze.start, maze.end, coinSpots, maze.rng);
     this.mapItem = null;
     if (mapSpot) {
@@ -613,7 +615,7 @@ if (farCell) {
       board.position.y = 1.12;
       mapGroup.add(board);
 
-      // 两端卷轴杆
+      // 两端卷轴杆（与平板同级；靠 update() 里的整体自转保持贴合，不要单独转 board）
       var rodGeo = new THREE.CylinderGeometry(0.05, 0.05, 0.56, 10);
       var rodMat = new THREE.MeshLambertMaterial({ color: 0x9a6428, emissive: 0x3a2206 });
       var rodL = new THREE.Mesh(rodGeo, rodMat);
@@ -623,7 +625,7 @@ if (farCell) {
       mapGroup.add(rodL);
       mapGroup.add(rodR);
 
-      // 顶部微光小球
+      // 顶部微光小球（在中轴 x=0,z=0，整体绕 Y 自转时位置不变）
       var glow = new THREE.Mesh(
         new THREE.SphereGeometry(0.09, 12, 10),
         new THREE.MeshBasicMaterial({ color: 0xffe9b0 })
@@ -814,8 +816,16 @@ if (farCell) {
     // 地图道具：漂浮 / 自转 / 呼吸光
     if (this.mapItem && !this.mapItem.collected) {
       var mi = this.mapItem;
+      // 上下浮动：position 在父空间平移，与下面的 rotation 互不覆盖
       mi.group.position.y = Math.sin(this.time * 2.2) * 0.08;
-      mi.board.rotation.y += dt * 1.2;
+      /* 自转作用在 mapGroup 整体上，而不是只转 board（BUG-021）。
+         只转 board 时：板绕自身几何中心转，两端在 X 方向的投影变成 ±0.31·cosθ，
+         而两根杆固定在 ±0.36，θ 越大缝隙越明显（θ=60° 约 0.155，θ=90° 约 0.28），
+         看起来就是"轴和地图分开了"。整体自转后杆与板的相对位置是常数，任何角度都贴合。
+         对其它成员无副作用：mapRing 是水平圆环（绕 Y 轴对称，转了看不出来）、
+         glow 与 mapLight 都在中轴 x=0,z=0 上（绕 Y 位置不变）、
+         色盲 Sprite 也在中轴且始终面向相机（公告板，父级旋转不影响其朝向）。 */
+      mi.group.rotation.y += dt * 1.2;
       var gsc = 1 + Math.sin(this.time * 3.4) * 0.22;
       mi.glow.scale.set(gsc, gsc, gsc);
       if (mi.ring) mi.ring.rotation.z += dt * 0.7;

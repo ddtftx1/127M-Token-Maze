@@ -1,101 +1,130 @@
-# 更新日志
+# 更新日志 · 2026-10-30
 
-> 归档约定：**本文件只放当前最新版本**。每次发新版前，把本文件整体移入
-> `CHANGELOG/YYYY.MM.DD/`（连该版本的说明文件一起），根目录重新从空白开始写。
-> 历史版本见 `CHANGELOG/2026.10.25/`。
+> 本文件只放**当前最新版本**；历史版本按日期归档在 `CHANGELOG/YYYY.MM.DD/`（现有 `2026.10.25`）。
+> 下次发新版前，把本文件整体移入新建的版本目录，根目录重新从空白开始写。
 
-## 2026-10-30 · 跨平台兼容与交互修复
+## 版本主题
 
-> 纯前端改动，无新增依赖；`localStorage` key、存档格式、`MG.*` 公共 API 完全兼容。
-> 本次新增 1 个脚本文件（`js/icons.js`）与 1 份声明文件（`THIRD_PARTY.md`）。
-> 4 个问题的根因分析、修复细节与验证过程见 `BUG/BUG(2026.10.30).md`。
+跨平台兼容、交互修复与地图道具改版：把 Emoji 全部换成内联 SVG、给老内核（Win7 / Chrome 49）补降级、
+修回放与成就提示的交互问题，并把"拾取地图卷轴"从"立即解锁小地图"改成"进背包、由玩家主动使用"。
 
-**范围**：`index.html` / `css/style.css` / `js/icons.js`（新增）/ `js/ui.js` / `js/main.js` / `js/input.js` / `js/shop.js`
-**兼容性**：存档、回放帧格式、排行榜分区、公共 API 全部未变；`localStorage` 无需迁移。
+**范围**：`index.html`、`css/style.css`、`js/icons.js`（新增）、`js/ui.js`、`js/main.js`、
+`js/input.js`、`js/shop.js`、`js/maze.js`、项目文档（`README.md` / `BUG/` / `THIRD_PARTY.md`）。
+涉及主菜单、HUD、设置、商店、道具面板、胜利结算、回放条与 3D 场景内的地图道具。
+
+**兼容性**：`localStorage` key（`maze3d.wallet.v1` 等 7 个）、存档结构、回放压缩帧格式、
+排行榜分区、`MG.*` 既有方法签名**全部未变**，无需迁移。
+唯一的行为性变化是道具获得途径（见「调整」），旧存档里的 `mapUnlock` 计数继续有效。
 
 ---
 
-### 布局与兼容
+## Bug 修复
 
-- 横屏紧凑布局的媒体查询补上设备判定
-  `(hover: none) and (pointer: coarse)`：桌面端窗口高度 ≤640px（Win7 退出全屏后）
-  不再被误判成手机横屏、页面不再被压成紧凑版，右侧整页白滚动条一并消失。
-- 新增启动期**特性检测**（`applyLegacyClasses()`），按能力给 `body` 挂
-  `legacy-env` / `legacy-inset` / `legacy-gap` / `legacy-dvh` 四个 class，
-  老内核（Chrome 49 / Win7）自动降级，现代浏览器零影响。
-- 全量展开 `inset` 简写为 `top / right / bottom / left` 四边声明（Chrome 87 之前不支持 `inset`）。
-- 安全区在 `env()` 不支持时不再让整条 `calc()` 失效：`legacy-env` 下把
-  `--safe-t/b/l/r` 统一按 `0px` 处理，`.hud-top` / `.toast` 另给显式兜底。
-
-### Bug 修复
-
-> 每条只写一句话结论，详细根因见 `BUG/BUG(2026.10.30).md`。
+> 每条只写一句话结论。根因分析、修复细节与验证过程见 `BUG/BUG(2026.10.30).md`。
 
 - **BUG-017** · Win7 缺彩色 Emoji 字体导致 UI 显示白框 / 单色，全部 Emoji 已替换为内联 Noto SVG 图标。
 - **BUG-018** · 老内核退出全屏后误入手机横屏紧凑布局且右侧出现白滚动条，已修正媒体查询并按能力降级。
-- **BUG-019** · 回放模式点击画面会误锁鼠标、按 P 会直接退出回放，已改为点击/P = 暂停继续、ESC = 退出。
+- **BUG-019** · 回放模式点击画面会误锁鼠标、按 P 会直接退出回放，已改为点击 / P = 暂停继续、ESC = 退出。
 - **BUG-020** · 通关后 1.2 秒内返回菜单或再玩一次会丢掉成就提示与音效，已改为挂起后补发。
+- **BUG-021** · 地图道具的卷轴杆与地图板旋转不同步（板转会"离开"固定轴），已改为整个卷轴一体自转；
+  真机回归通过（曾因测试副本未同步被误判为未修复，过程见归档条目「回归记录」）。
 
-### 新增
+---
 
-- `js/icons.js`：16 个 Noto Emoji 彩色 SVG 的内联字符串库，`MG.Icons.svg[key]`。
-- `MG.UI.icon(name)`：返回原始 SVG 字符串；`MG.UI.iconHtml(name)`：返回可直接拼进
-  `innerHTML` 的图标 HTML（自动加唯一 `id` 后缀）；`MG.UI.fillIcons(root)`：
-  把 `<span data-icon="key">` 占位填充为真实图标（幂等）。
-- `THIRD_PARTY.md`：第三方资源与许可证声明（Noto Emoji / Apache-2.0、Three.js / MIT）。
-- `CHANGELOG/` 归档目录：历史版本按日期分文件夹保存，本文件只留最新版。
+## 新增
 
-### 调整
+- **`js/icons.js`**：16 个 Noto Emoji 彩色 SVG 的内联字符串库，挂在 `MG.Icons.svg`，随 `index.html` 在 `settings.js` 之前加载。
+- **`MG.UI.iconHtml(name)`**：返回可直接拼进 `innerHTML` 的图标 HTML（自动给每个实例的 `id` 与 `url(#id)` 引用加唯一后缀，避免同一图标多处出现时渐变串味）。
+- **`MG.UI.fillIcons(root)`**：把 `<span data-icon="key">` 占位填充为真实图标，幂等（带 `data-icon-done` 标记）。
+- **`MG.UI.icon(name)`**：返回原始 SVG 字符串。
+- **`MG.Shop.addItem(id, n)`**：非商店来源（拾取）的道具入库入口；只对 `type === 'count'` 生效，
+  买断类与未知 id 返回 `false` 且不写盘，`n` 取整且至少为 1。与购买共用同一份钱包。
+- **`THIRD_PARTY.md`**：第三方资源与许可证声明（Noto Emoji / Apache-2.0、Three.js / MIT）。
+- **`CHANGELOG/` 归档目录**：历史版本按日期分文件夹保存。
 
-- HTML 与 JS 里的 39 处 Emoji 全部改为 `<span class="svg-icon" data-icon="...">`
-  或 `MG.UI.iconHtml()` 拼接；`⛶ ⚙ ✖ ▶ ↻` 等符号按要求保留不动。
-- `shop.js` 的 `ITEMS[*].icon` 由 Emoji 字符改为 key 名（`map` / `compass` / `bolt` / `money`）。
-- `MG.UI.toast(msg, duration, asHtml)` 增加第三个参数：默认仍走 `textContent`
-  （种子等用户输入不会被当成标签），只有内部拼图标时才传 `true`。
-- HUD 钱包、道具按钮由 `textContent` 改 `innerHTML`（需要渲染图标），并加"值没变就不动 DOM"的判断。
-- `svg/摄像头.svg` 素材修正：去掉重复的第二个 SVG 根节点与自带的白色背景矩形，
-  重新生成 `js/icons.js`（真机测试后发现）。
+---
 
-### 性能
+## 调整
 
-- 图标 HTML 按元素缓存（`iconHtmlFor()`）：HUD 每 100ms 刷新一次钱包与道具按钮，
+- **地图道具改为"拾取进背包，使用后解锁"**：走到卷轴旁拾取 → 模型消失、`mapUnlock` 库存 +1、
+  提示"已获得地图道具，可在道具面板中使用"，**不再**当场解锁小地图；
+  玩家按 F 打开道具面板点「使用」后才走 `useItem('mapUnlock')` 解锁。
+  商店购买的与拾取获得的共用同一计数，使用一次只扣一次；已解锁后再用提示"本局已解锁，无需重复使用"且不扣库存。
+  改动前 → 改动后：拾取即解锁 → 拾取入背包、主动使用才解锁。目的：让"找到卷轴"和"用小地图"成为两个决策点，
+  与商店道具走同一套使用流程。
+- **拾取后清空方位提示**：简单难度原本在开局提示"地图在东 / 西 / 南 / 北侧"，道具被拿走后该提示已失效，
+  改为清空（小地图仍保持锁定占位，只是不再显示过时的方位）。
+- **地图卷轴自转对象**：`board` → 整个 `mapGroup`（BUG-021）。卷轴杆与地图板从此作为一体旋转；
+  浮动幅度 0.08、自转速度 1.2、呼吸幅度 0.22、圆环自转 0.7 全部保持原值。
+- **HTML 与 JS 里 39 处 Emoji** 全部改为 `<span class="svg-icon" data-icon="...">` 或 `MG.UI.iconHtml()` 拼接；
+  `⛶ ⚙ ✖ ▶ ↻` 等跨平台符号按要求保留。
+- **`js/shop.js` 的 `ITEMS[*].icon`** 由 Emoji 字符改为 key 名（`map` / `compass` / `bolt` / `money`）；
+  商店里 `mapUnlock` 的价格、描述文案与购买逻辑均未变。
+- **`MG.UI.toast(msg, duration, asHtml)`** 增加第三个参数：默认仍走 `textContent`
+  （种子等用户输入不会被当成标签解析），只有内部拼图标时才传 `true`。
+- **HUD 钱包与道具按钮**由 `textContent` 改 `innerHTML`（需要渲染图标），并加"值没变就不动 DOM"的判断。
+- **摄像头图标素材修正**：去掉重复的第二个 SVG 根节点与自带的 128×128 白色背景矩形，重新生成 `js/icons.js`
+  （源文件在本地素材目录 `svg/`，该目录不入库）。
+
+---
+
+## 性能
+
+- **图标 HTML 按元素缓存**（`iconHtmlFor()`）：HUD 每 100ms 刷新一次钱包与道具按钮，
   原先每次都要重新拼一遍最大 5KB 的 SVG 字符串并重建 DOM 节点，现在只在数值变化时写一次。
-- `js/icons.js` 为 101KB（内联图形 94KB），一次性解析、无网络请求，`file://` 与
-  本地服务器下行为一致；不引入任何构建步骤。
+- **`js/icons.js` 约 99KB**（图形本体 92KB），一次性解析、零网络请求，`file://` 与本地服务器行为一致，不引入构建步骤。
+- **地图道具自转**由 `board` 换成 `mapGroup`：每帧操作的对象数量不变（仍是 4 次写），无额外开销。
 
-### 保持不变
+---
 
-- `input.js` 的全局 `touchmove` 拦截与 `{ passive: false }` 写法（页面不滚动/不缩放的关键）；
-- `maze.js` 天花板 `side: THREE.FrontSide`、色盲友好配色的全部绘制细节、`minimapCoins` 实心/轮廓区分；
+## 保持不变
+
+- `input.js` 的全局 `touchmove` 拦截与 `{ passive: false }` 写法（页面不滚动 / 不缩放的关键）；
+- `maze.js` 天花板 `side: THREE.FrontSide`、色盲友好配色的全部绘制细节、`minimapCoins` 实心 / 轮廓区分；
 - 回放压缩帧格式、`MAX_FRAMES` / `SAMPLE_INTERVAL`、A\* 启发式与贪心拾取策略；
-- 所有 `localStorage` key 与数据格式、`MG.*` 既有方法签名、彩蛋逻辑。
+- 地图道具的**拾取判定半径与时机**（`tryCollectMap()` 一行未改）、卷轴世界坐标 `it.world`、
+  色盲"图"字 Sprite 的挂载对象（仍是 `mapGroup`）与 `y=2.15` 位置；
+- 所有 `localStorage` key 与数据格式、`MG.*` 既有方法签名、彩蛋逻辑、成就 / 排行榜 / 存档 / 回放 / 幽灵。
 
-### 验证
+---
 
-- **静态**：11 个原有 JS + 新增 `icons.js` 全部 `node --check` 通过；
-  `index.html` 用 HTML 解析器验证无未闭合/不匹配标签，109 个 `id` 无重复，
-  `ui.js` 缓存的 109 个元素与 HTML 一一对应。
-- **逻辑（无头环境实跑）**：76 项断言全通过 —— 16 个图标的 `id` 唯一性与
-  `url(#id)` / `xlink:href` 引用自洽、`fillIcons` 幂等、回放点击与 P 键的状态机
-  （replay / playing / menu / paused / win / loading 六态）、触摸合成点击过滤、
-  成就挂起与补发（清定时器不丢挂起数据、`flush` 只播一次、调用点顺序）。
-- **回归**：3 难度 × 2 算法 × 6 种子 = 36/36 组迷宫生成 + A\* 路径合法（相邻、不穿墙）。
-- **待人工验收（真机/浏览器，无头环境给不出结论）**：
-  1. Win7 + Chrome 49 实际打开，确认 16 个图标不再白框、退出全屏后布局正常、无白条；
-  2. 手机横屏（矮屏）与竖屏各走一遍，确认图标尺寸/基线与原 Emoji 视觉一致；
-  3. 鼠标设备下回放点击暂停、按 P 暂停、ESC 退出；触屏设备滑动转视角不误暂停。
+## 验证
 
-### 改动文件汇总
+- **静态检查**：12 个 JS 全部 `node --check` 通过；ES5 约束扫描（`let` / `const` / 箭头函数 / 模板字符串）0 命中；
+  `index.html` 用 HTML 解析器验证无未闭合标签、109 个 `id` 无重复、`ui.js` 缓存的 109 个元素与 HTML 一一对应。
+- **逻辑 / 单元验证（无头环境实跑）**：**165 项断言全部通过** ——
+  图标 id 唯一性与引用自洽 18 项、回放状态机 15 项、成就挂起补发 17 项、静态一致性 26 项、
+  地图道具库存与拾取分支 49 项、地图道具几何（真实 three.js）40 项；
+  另有迷宫生成 + A\* 回归 **36/36 组**通过。
+  （验证脚本为纯 node + 无依赖，运行在仓库外临时目录，**未随仓库分发**；断言要点见 `BUG/` 对应条目。）
+- **真机回归（2026-10-31 已通过）**：
+  1. 走到地图卷轴旁静观：杆与板作为整体同步自转，任何角度无缝隙（BUG-021 闭环）；
+  2. 拾取地图道具：小地图仍锁定、HUD 距离与指南针距离仍隐藏、简单难度方位提示消失；
+     按 F 打开面板点「使用」后才解锁、库存 -1，已解锁后不再扣库存；
+  3. 摄像头图标：单根节点、透明底，回放条「跟随」按钮显示正常。
+- **仍待人工确认（无头环境无法覆盖）**：
+  1. Win7 + Chrome 49 实际渲染：16 个图标不再白框、退出全屏后布局正常、无白条；
+  2. 手机横屏矮屏与竖屏：图标尺寸 / 基线与原 Emoji 的视觉一致性；
+  3. 鼠标设备回放：点画面暂停、按 P 暂停、ESC 退出；触屏滑动转视角不误暂停。
+- **发版前务必校验各副本已同步**（BUG-021 曾因副本未同步出现一次"假回归"）：
+  `grep -c "mi.group.rotation.y" js/maze.js` 应 ≥ 1、`grep -c "board.rotation.y" js/maze.js` 应为 0。
 
-| 文件 | 改动 |
-|------|------|
-| `js/icons.js` | **新增**。16 个内联 SVG + `MG.Icons` |
-| `index.html` | 加 `js/icons.js`（在 `settings.js` 之前）；20 处图标占位替换 Emoji |
-| `js/ui.js` | 新增 `icon()` / `iconHtml()` / `iconHtmlFor()` / `fillIcons()`；14 处 Emoji 替换；`toast` 支持 HTML 模式 |
-| `js/main.js` | `boot()` 先跑特性检测并填充图标；注入 `getState` / `onToggleReplayPause`；成就 toast 改为挂起补发；4 处 Emoji 替换 |
+---
+
+## 改动文件汇总
+
+| 文件 | 改动说明 |
+|------|----------|
+| `js/icons.js` | **新增**。16 个内联 SVG + `MG.Icons`（含 `get()` 兜底） |
+| `index.html` | 加载 `js/icons.js`（在 `settings.js` 之前）；20 处图标占位替换 Emoji |
+| `js/ui.js` | 新增 `icon()` / `iconHtml()` / `iconHtmlFor()` / `fillIcons()`；14 处 Emoji 替换；`toast` 支持 HTML 模式；HUD 写入加变更判断 |
+| `js/main.js` | `boot()` 先跑特性检测并填充图标；注入 `getState` / `onToggleReplayPause`；成就 toast 改挂起补发；4 处 Emoji 替换；**地图拾取改入背包**（`addItem` + 清空 `mapHint` + HUD 刷新，不置 `mapFound`） |
 | `js/input.js` | 回放点击 / P 键语义；触摸合成点击过滤；`matchMedia` 设备判定 |
-| `js/shop.js` | `ITEMS[*].icon` 改 key |
+| `js/shop.js` | `ITEMS[*].icon` 改 key；**新增 `addItem(id, n)`** |
+| `js/maze.js` | 地图道具自转从 `board` 改为整个 `mapGroup`（BUG-021）；相关注释同步（道具结构与 `build()` 未改） |
 | `css/style.css` | `.svg-icon` 规则；媒体查询补设备判定；`inset` 展开；4 类老内核降级块；`100dvh` 兜底 |
-| `THIRD_PARTY.md` | **新增**。第三方资源与许可证声明 |
-| `BUG/BUG(2026.10.30).md` | **新增**。BUG-017 ~ BUG-020 |
-| `README.md` | 文件结构表补 `js/icons.js` / `THIRD_PARTY.md` / `svg/` / `CHANGELOG/`；补兼容性说明 |
+| `THIRD_PARTY.md` | **新增**。第三方资源与许可证声明（含对 `摄像头.svg` 的修改说明） |
+| `BUG/BUG(2026.10.30).md` | **新增**。BUG-017 ~ BUG-021（5 条） |
+| `BUG/BUG.md` | 编号与状态同步（当前最大 BUG-021，下一个 BUG-022） |
+| `README.md` | 文件结构表补 `js/icons.js` / `THIRD_PARTY.md` / `CHANGELOG/`；新增「兼容性」「文档与更新流程」章节 |
+| `.gitignore` | **新增**。排除本地素材 `svg/` 与任务书 `*修改要求.md` / `*修复要求.txt`，它们只供开发参考、不入库 |

@@ -194,6 +194,34 @@
     return true;
   }
 
+  /**
+   * 增加道具次数（"非商店来源"的获得途径，例如迷宫里拾取到地图卷轴）
+   *
+   * 设计约束：
+   * - 只对 type === 'count' 的商品生效；买断类（boostEarn）与未知 id 直接返回 false，不写盘；
+   * - n 取整，并保证至少为 1（传 0 / 负数 / NaN 都按 1 处理，避免"什么都没加还写了一次盘"）；
+   * - 与商店购买共用同一份钱包（同一 localStorage key），所以道具面板里的数量
+   *   天然是"购买 + 拾取"合并后的值，使用一次只扣一次；
+   * - 不改动 buy / consumeItem / countOf / addCoins 的任何行为与签名。
+   *
+   * @param {string} id 商品 id（如 'mapUnlock'）
+   * @param {number} [n] 增加数量，默认 1
+   * @returns {boolean} 是否成功写入
+   */
+  function addItem(id, n) {
+    var item = getItem(id);
+    // 只允许可计数的道具；买断类与未知 id 一律拒绝，且不触碰钱包
+    if (!item || item.type !== 'count') return false;
+
+    var add = Math.floor(Number(n));
+    if (!isFinite(add) || add < 1) add = 1;
+
+    var w = getWallet();
+    // 用 countOf() 读取再写回：与 buy / consumeItem 保持同一口径（兼容旧数据与损坏修复后的值）
+    w[id] = countOf(id) + add;
+    return saveWallet();
+  }
+
   /** 金币收益倍率（默认 1.0，买断后 1.25） */
   function coinMultiplier() {
     return getWallet().boostEarn ? BOOST_MULTIPLIER : 1.0;
@@ -249,6 +277,7 @@
     isMaxed: isMaxed,
     buy: buy,
     consumeItem: consumeItem,
+    addItem: addItem,
     coinMultiplier: coinMultiplier,
     SECRET_GIFT_COINS: SECRET_GIFT_COINS,
     SECRET_GIFT_ITEM_COUNT: SECRET_GIFT_ITEM_COUNT,

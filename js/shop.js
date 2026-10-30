@@ -29,22 +29,22 @@
   /** 商品表（数值定案，直购无折扣） */
   var ITEMS = [
     {
-      id: 'mapUnlock', icon: '🗺️', name: '小地图开局解锁', short: '小地图解锁',
+      id: 'mapUnlock', icon: 'map', name: '小地图开局解锁', short: '小地图解锁',
       desc: '本局使用后小地图立即解锁',
       price: 25, limit: 99, type: 'count'
     },
     {
-      id: 'bestPath', icon: '🧭', name: '最佳路径', short: '最佳路径',
+      id: 'bestPath', icon: 'compass', name: '最佳路径', short: '最佳路径',
       desc: '启动「最佳路径」自动寻路：优先拾取沿途金币与地图卷轴（拾取阶段绕开终点，避免提前通关），中/困难难度单次限 60 / 50 格，可再次使用继续拾取',
       price: 30, limit: 99, type: 'count'
     },
     {
-      id: 'fastPath', icon: '⚡', name: '最快路径', short: '最快路径',
+      id: 'fastPath', icon: 'bolt', name: '最快路径', short: '最快路径',
       desc: '启动"最快路径"自动寻路：忽略沿途金币与地图，径直冲向终点',
       price: 20, limit: 99, type: 'count'
     },
     {
-      id: 'boostEarn', icon: '💰', name: '金币收益 +25%', short: '金币收益 +25%',
+      id: 'boostEarn', icon: 'money', name: '金币收益 +25%', short: '金币收益 +25%',
       desc: '之后所有局金币拾取量 ×1.25（一次性买断）',
       price: 150, limit: 1, type: 'buyout'
     }

@@ -45,6 +45,11 @@
 
     // 鼠标状态（只保留 Pointer Lock；不再有"按住拖动"模式）
     this.pointerLocked = false;
+    /**
+     * 最近一次触摸的时间戳。触屏设备上手指抬起后浏览器会补发一次合成 click，
+     * 若不过滤，手机上"滑动转视角"松手就会触发"点击"语义（误锁指针 / 回放误暂停）。
+     */
+    this._lastTouchTime = 0;
 
     // 回调（由主循环注入）
     this.onPause = null;
@@ -54,6 +59,13 @@
     this.onToggleItems = null;  // F 键：道具面板开合（新语义）
     this.onFirstInput = null;   // 首次输入（用于解锁音频）
     this.onEsc = null;
+    this.onToggleReplayPause = null; // 回放：点击画面 / 按 P 暂停继续
+    /**
+     * 状态查询钩子（由 main.js 注入，返回 'menu' / 'loading' / 'playing' / 'paused' / 'win' / 'replay'）。
+     * 让 input 层能判断"现在点画面该不该锁指针"，同时不反向依赖 main.js
+     *（input.js 在 main.js 之前加载，模块顺序即依赖顺序）。
+     */
+    this.getState = null;
 
     this._bind();
   }
@@ -63,6 +75,12 @@
    * ---------------------------------------------------------- */
   Input.prototype._bind = function () {
     var self = this;
+
+    /* ---------- 记录最近一次触摸时间（用于过滤触摸产生的合成 click） ---------- */
+    function markTouch() { self._lastTouchTime = Date.now(); }
+    var touchMarkOpts = { passive: true };
+    document.addEventListener('touchstart', markTouch, touchMarkOpts);
+    document.addEventListener('touchend', markTouch, touchMarkOpts);
 
     /* ---------- 阻止默认的滚动 / 缩放 / 长按菜单 ---------- */
     document.addEventListener('gesturestart', function (e) { e.preventDefault(); }, { passive: false });
@@ -197,7 +215,13 @@
 
       if (k === 'r') { if (self.onRestart) self.onRestart(); }
       else if (k === 'm') { if (self.onToggleMinimap) self.onToggleMinimap(); }
-      else if (k === 'p') { if (self.onPause) self.onPause(); }
+      else if (k === 'p') {
+        // 回放态：P = 暂停 / 继续；其它状态保持原逻辑（暂停菜单开合）。
+        // 原实现会让回放里的 P 走进 onPause → main 侧把回放直接退出（BUG-019）
+        if (self.getState && self.getState() === 'replay') {
+          if (self.onToggleReplayPause) self.onToggleReplayPause();
+        } else if (self.onPause) self.onPause();
+      }
       else if (k === 'f') {
         // F = 道具面板（新）；优先新回调，兼容旧 onAutoPath
         if (self.onToggleItems) self.onToggleItems();
@@ -241,8 +265,23 @@
           if (e.button !== 0) return;
           self._notifyFirstInput();
         });
-        // 点击画面即尝试进入 Pointer Lock（不按设备类型判断，触屏笔记本 / iPad + 键鼠同样可用）
+        /**
+         * 点击画面的语义（BUG-019）：
+         * - 触摸产生的合成 click 一律忽略（见 _lastTouchTime）
+         * - 只认"悬停 + 精细指针"设备（鼠标 / 触控板），触屏走 touch 事件
+         * - 回放态：点击 = 暂停 / 继续，绝不请求 Pointer Lock
+         * - 非 playing 态（菜单 / 暂停 / 胜利 / 加载）：不请求 Pointer Lock
+         * - playing 态：保持原行为，点击锁定指针
+         */
         node.addEventListener('click', function () {
+          if (Date.now() - self._lastTouchTime < 500) return;
+          if (!hasHoverPointer()) return;
+          var state = self.getState ? self.getState() : 'playing';
+          if (state === 'replay') {
+            if (self.onToggleReplayPause) self.onToggleReplayPause();
+            return;
+          }
+          if (state !== 'playing') return;
           if (!self.pointerLocked && !document.hidden) {
             self.requestPointerLock();
           }
@@ -278,6 +317,20 @@
       scrollables[i].dataset.scrollable = '1';
     }
   };
+
+  /**
+   * 是否为"有悬停能力 + 精细指针"的设备（鼠标 / 触控板）。
+   * 用标准媒体特性查询，不猜 UA：触屏笔记本（鼠标+触摸并存）也能正确区分，
+   * 第一次按下鼠标时 hover 会切换为 hover，从而马上可用。
+   */
+  function hasHoverPointer() {
+    try {
+      if (window.matchMedia) {
+        return window.matchMedia('(hover: hover) and (pointer: fine)').matches;
+      }
+    } catch (e) { /* 老环境忽略，走下面的兜底判断 */ }
+    return !('ontouchstart' in window);
+  }
 
   /** 摇杆拖动更新 */
   Input.prototype._updateJoystick = function (cx, cy) {

@@ -44,6 +44,84 @@
     mapCacheDirty = true;
   }
 
+  /* ------------------------------------------------------------
+   * 图标（内联 SVG，源码见 js/icons.js）
+   * 为什么不用 Emoji：Win7 没有彩色 Emoji 字体（显示白框 / tofu），
+   * Win10 部分字符只有单色；换成内联 SVG 后与系统字体无关。
+   * ---------------------------------------------------------- */
+  /** 每个实例的后缀计数：Noto 的 svg 内部有 id 与 url(#id) 引用，
+      同一图标在页面上出现多次（例如奖杯同时出现在排行榜按钮和成就页）时必须各自加后缀，
+      否则渐变 / 裁剪 / mask 会互相串味（先渲染的覆盖后面的） */
+  var iconSeq = 0;
+
+  /** 原样返回 svg 源码字符串（MG.Icons.svg[name]），缺失时返回空串 */
+  function icon(name) {
+    return (MG.Icons && MG.Icons.svg && MG.Icons.svg[name]) || '';
+  }
+
+  /** 取 svg 源码并给本实例的 id / url(#id) 引用统一加后缀（纯字符串替换，不改结构） */
+  function iconSvg(name) {
+    var raw = icon(name);
+    if (!raw) return '';
+    iconSeq++;
+    var sfx = '__i' + iconSeq;
+    return raw
+      .replace(/\bid="([^"]+)"/g, function (m, id) { return 'id="' + id + sfx + '"'; })
+      .replace(/url\(#([^)"']+)\)/g, function (m, id) { return 'url(#' + id + sfx + ')'; })
+      .replace(/(xlink:href="#)([^"]+)"/g, function (m, p, id) { return p + id + sfx + '"'; })
+      .replace(/(\shref="#)([^"]+)"/g, function (m, p, id) { return p + id + sfx + '"'; });
+  }
+
+  /**
+   * 返回可直接拼进 innerHTML 的图标 HTML。
+   * 动态内容（排行榜 / 商店 / 成就列表）必须用它，不要用 textContent，
+   * 否则会把 svg 标签当文本显示出来。
+   */
+  function iconHtml(name) {
+    var svg = iconSvg(name);
+    if (!svg) return '';
+    return '<span class="svg-icon">' + svg + '</span>';
+  }
+
+  /**
+   * 元素级图标 HTML 缓存。
+   * HUD 每 100ms 刷一次钱包余额与道具按钮，每次都重新拼一遍 svg 字符串（最大 5KB）
+   * 既浪费又会不停重建 DOM 节点；同一元素上图标只会有一个实例，
+   * 后缀只要稳定即可，所以缓存到元素上（不挂全局，避免不同元素共用同一份 id）。
+   */
+  function iconHtmlFor(node, name) {
+    if (!node) return iconHtml(name);
+    var cache = node.__iconCache;
+    if (!cache || cache.name !== name) {
+      node.__iconCache = { name: name, html: iconHtml(name) };
+      cache = node.__iconCache;
+    }
+    return cache.html;
+  }
+
+  /**
+   * 把 root（默认 document）内所有 <span data-icon="key"> 占位填充为真实 svg。
+   * 幂等：已填充的节点带 data-icon-done="1"，重复调用不会重复插入。
+   * 注意：boot 只能处理静态标记，动态生成的 HTML 请直接用 iconHtml()。
+   */
+  function fillIcons(root) {
+    var scope = root || document;
+    if (!scope || !scope.querySelectorAll) return;
+    var nodes = scope.querySelectorAll('[data-icon]');
+    for (var i = 0; i < nodes.length; i++) {
+      var n = nodes[i];
+      if (n.getAttribute('data-icon-done') === '1') continue;
+      var svg = iconSvg(n.getAttribute('data-icon') || '');
+      if (!svg) continue; // 缺图标：留空占位，不写 undefined
+      n.innerHTML = svg;
+      // 标记里通常已经写了 class="svg-icon"，这里只在缺失时补，避免类名重复堆叠
+      if ((' ' + (n.className || '') + ' ').indexOf(' svg-icon ') < 0) {
+        n.className = n.className ? n.className + ' svg-icon' : 'svg-icon';
+      }
+      n.setAttribute('data-icon-done', '1');
+    }
+  }
+
   /**
    * 重置小地图缓存状态（每局开始时调用）
    * 清空"上次格坐标 / 探索计数 / 签名"，避免上一局的统计与签名让新一局误判为"缓存有效"
@@ -229,7 +307,7 @@
     if (el['win-steps']) el['win-steps'].textContent = data.steps + ' 步';
     if (el['win-diff']) el['win-diff'].textContent = data.diffName;
     if (el['win-autopath']) el['win-autopath'].textContent = data.usedAutoPath ? '是' : '否';
-    if (el['win-coins']) el['win-coins'].textContent = '+' + (data.coinsEarned || 0) + ' 💰';
+    if (el['win-coins']) el['win-coins'].innerHTML = '+' + (data.coinsEarned || 0) + ' ' + iconHtml('money');
     if (el['win-best']) {
       el['win-best'].textContent = data.best
         ? formatTime(data.best.time) + ' / ' + data.best.steps + ' 步'
@@ -243,7 +321,7 @@
     if (el['win-ranking']) {
       var maxEntries = MG.Ranking ? MG.Ranking.MAX_ENTRIES : 10;
       if (data.rank && data.rank >= 1 && data.rank <= maxEntries) {
-        el['win-ranking'].textContent = '🏅 进入排行榜第 ' + data.rank + ' 名';
+        el['win-ranking'].innerHTML = iconHtml('medal') + ' 进入排行榜第 ' + data.rank + ' 名';
         el['win-ranking'].classList.remove('hidden');
       } else {
         el['win-ranking'].classList.add('hidden');
@@ -557,11 +635,12 @@
     for (var k = 0; k < list.length; k++) {
       var r = list[k];
       var rankCls = k < 3 ? ' ' + medals[k] : '';
-      var autoTxt = r.auto ? '⚡ 自动寻路' : '徒步';
-      var sub = autoTxt + ' · 种子 ' + (r.seed || '—') + ' · ' + (r.date || '');
+      // 图标是内联 SVG，整串过 escapeHtml 会把标签转义成文本，所以只转义用户可写字段
+      var autoTxt = r.auto ? iconHtml('bolt') + ' 自动寻路' : '徒步';
+      var sub = autoTxt + ' · 种子 ' + escapeHtml(r.seed || '—') + ' · ' + escapeHtml(r.date || '');
       html += '<li><span class="rk-rank' + rankCls + '">' + (k + 1) + '</span>' +
         '<span class="rk-info"><b>' + formatTime(r.time) + ' · ' + r.steps + ' 步</b>' +
-        '<em>' + escapeHtml(sub) + '</em></span></li>';
+        '<em>' + sub + '</em></span></li>';
     }
     el['ranking-list'].innerHTML = html;
   }
@@ -605,12 +684,12 @@
     }
     if (el['btn-replay-pause']) {
       var atEnd = !playing && t >= total - 0.01;
-      el['btn-replay-pause'].textContent = playing ? '⏸ 暂停' : (atEnd ? '↻ 重播' : '▶ 继续');
+      el['btn-replay-pause'].innerHTML = playing ? iconHtml('pause') + ' 暂停' : (atEnd ? '↻ 重播' : '▶ 继续');
     }
   }
 
   function setReplayViewLabel(isFollow) {
-    if (el['btn-replay-view']) el['btn-replay-view'].textContent = isFollow ? '🎥 跟随' : '🗺 全景';
+    if (el['btn-replay-view']) el['btn-replay-view'].innerHTML = isFollow ? iconHtml('camera') + ' 跟随' : iconHtml('map') + ' 全景';
   }
 
   /* ------------------------------------------------------------
@@ -677,14 +756,14 @@
         ? ('已购 ' + formatCompactNum(owned))
         : ('已购 ' + formatCompactNum(owned) + ' / ' + it.limit);
       html += '<div class="shop-card">' +
-        '<div class="shop-icon">' + it.icon + '</div>' +
+        '<div class="shop-icon">' + iconHtml(it.icon) + '</div>' +
         '<div class="shop-info">' +
           '<div class="shop-name">' + it.name + '</div>' +
           '<div class="shop-desc">' + it.desc + '</div>' +
           '<div class="shop-meta">' + ownedText + '</div>' +
         '</div>' +
         '<div class="shop-buy">' +
-          '<div class="shop-price">' + it.price + ' 💰</div>' +
+          '<div class="shop-price">' + it.price + ' ' + iconHtml('money') + '</div>' +
           '<button class="' + btnCls + '" data-buy-id="' + it.id + '"' +
             (maxed ? ' disabled' : '') + '>' +
             (maxed ? '已购满' : '购买') +
@@ -775,12 +854,12 @@
       if (rewardKey === 'coins') {
         MG.Shop.claimSecretGift();
         if (MG.Audio && S.get().sfx) MG.Audio.purchase();
-        toast('🎉 答对了！奖励 ' + formatNum(MG.Shop.SECRET_GIFT_COINS || 99999) + ' 金币已到账');
+        toast(iconHtml('party') + ' 答对了！奖励 ' + formatNum(MG.Shop.SECRET_GIFT_COINS || 99999) + ' 金币已到账', 1800, true);
       } else if (rewardKey === 'items') {
         MG.Shop.claimSecretItemGift();
         if (MG.Audio && S.get().sfx) MG.Audio.purchase();
-        toast('🎉 答对了！所有道具 +' + formatNum(MG.Shop.SECRET_GIFT_ITEM_COUNT || 99999) +
-          ' 已到账（可累积，金币收益为一次买断）');
+        toast(iconHtml('party') + ' 答对了！所有道具 +' + formatNum(MG.Shop.SECRET_GIFT_ITEM_COUNT || 99999) +
+          ' 已到账（可累积，金币收益为一次买断）', 1800, true);
       }
       closeSecretDialog();
       refreshShop(); // 同步商店余额 / 道具显示
@@ -917,14 +996,14 @@
       var n = MG.Shop.countOf(it.id);
       if (n <= 0) continue;
       html += '<li class="item-row">' +
-        '<span class="item-icon">' + it.icon + '</span>' +
+        '<span class="item-icon">' + iconHtml(it.icon) + '</span>' +
         '<span class="item-name">' + (it.short || it.name) + '</span>' +
         '<span class="item-count">×' + formatCompactNum(n) + '</span>' +
         '<button class="mini-btn item-use-btn" data-use-id="' + it.id + '">使用</button>' +
       '</li>';
     }
     if (!html) {
-      html = '<li class="item-empty">暂无道具，去主菜单的「🏪 商店」看看吧</li>';
+      html = '<li class="item-empty">暂无道具，去主菜单的「' + iconHtml('shop') + ' 商店」看看吧</li>';
     }
     el['item-list'].innerHTML = html;
   }
@@ -1212,7 +1291,10 @@
     // 钱包余额：普通金额保留千分位（更直观），超过 1e8 时用紧凑格式兜底防溢出
     if (el['stat-wallet']) {
       var wc = data.walletCoins || 0;
-      el['stat-wallet'].textContent = (wc >= 1e8 ? formatCompactNum(wc) : formatNum(wc)) + ' 💰';
+      var walletHtml = (wc >= 1e8 ? formatCompactNum(wc) : formatNum(wc)) + ' ' +
+        iconHtmlFor(el['stat-wallet'], 'money');
+      // 数值没变就别动 DOM：innerHTML 每次都会重建节点
+      if (el['stat-wallet'].innerHTML !== walletHtml) el['stat-wallet'].innerHTML = walletHtml;
     }
 
     // 指南针
@@ -1276,7 +1358,10 @@
         btn.classList.remove('hidden');
         var n = data.itemTotal || 0;
         // 超大数量（彩蛋奖励可累积到 10w+）用紧凑格式，避免按钮文字溢出
-        btn.textContent = n > 0 ? '🎒道具 ×' + formatCompactNum(n) : '🎒道具';
+        var itemsHtml = n > 0
+          ? iconHtmlFor(btn, 'bag') + '道具 ×' + formatCompactNum(n)
+          : iconHtmlFor(btn, 'bag') + '道具';
+        if (btn.innerHTML !== itemsHtml) btn.innerHTML = itemsHtml;
       }
     }
     if (cancel) {
@@ -1550,7 +1635,7 @@
       var has = !!got[a.id];
       if (has) unlocked++;
       html += '<li class="' + (has ? 'done' : '') + '"><span>' +
-        (has ? '✅ ' : '🔒 ') + a.name + '</span><b>' + a.desc + '</b></li>';
+        (has ? iconHtml('check') + ' ' : iconHtml('lock') + ' ') + a.name + '</span><b>' + a.desc + '</b></li>';
     }
     html += '<li><span>总进度</span><b>' + unlocked + ' / ' + list.length + '</b></li>';
     el['achievements-list'].innerHTML = html;
@@ -1560,10 +1645,17 @@
    * Toast 提示
    * ---------------------------------------------------------- */
   var toastTimer = null;
-  function toast(msg, duration) {
+  /**
+   * @param {string} msg 提示文本
+   * @param {number} [duration] 毫秒，默认 1800
+   * @param {boolean} [asHtml] 为 true 时按 HTML 解析（仅供内部拼接内联 SVG 图标使用；
+   *   默认 false 走 textContent，这样含种子的提示不会被当成标签）
+   */
+  function toast(msg, duration, asHtml) {
     var node = el['toast'];
     if (!node) return;
-    node.textContent = msg;
+    if (asHtml) node.innerHTML = msg;
+    else node.textContent = msg;
     node.classList.add('show');
     if (toastTimer) clearTimeout(toastTimer);
     toastTimer = setTimeout(function () {
@@ -1691,6 +1783,9 @@
    * ---------------------------------------------------------- */
   MG.UI = {
     el: el,
+    icon: icon,
+    iconHtml: iconHtml,
+    fillIcons: fillIcons,
     init: init,
     show: show,
     hide: hide,

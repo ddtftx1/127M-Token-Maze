@@ -67,7 +67,7 @@
             <button id="btn-seed-random" class="mini-btn" title="随机种子">随机</button>
             <button id="btn-seed-copy" class="mini-btn" title="复制种子">复制</button>
           </div>
-          <button id="btn-daily" class="mini-btn wide">📅 每日挑战（世界同步种子）</button>
+          <button id="btn-daily" class="mini-btn wide"><span class="svg-icon" data-icon="calendar"></span> 每日挑战（世界同步种子）</button>
 
           <!-- 最佳记录 -->
           <div class="section-label">最佳记录</div>
@@ -78,9 +78,9 @@
             <button id="btn-start" class="primary-btn">开始游戏</button>
             <button id="btn-settings-menu" class="secondary-btn">设置</button>
           </div>
-          <button id="btn-ranking-menu" class="mini-btn wide">🏆 本地排行榜</button>
-          <button id="btn-shop" class="mini-btn wide">🏪 商店</button>
-          <button id="btn-achievements-menu" class="mini-btn wide">🏆 成就</button>
+          <button id="btn-ranking-menu" class="mini-btn wide"><span class="svg-icon" data-icon="trophy"></span> 本地排行榜</button>
+          <button id="btn-shop" class="mini-btn wide"><span class="svg-icon" data-icon="shop"></span> 商店</button>
+          <button id="btn-achievements-menu" class="mini-btn wide"><span class="svg-icon" data-icon="trophy"></span> 成就</button>
         </div>
       </div>
 
@@ -101,13 +101,13 @@
         <div class="stat"><span class="stat-label">难度</span><span id="stat-diff" class="stat-value">简单</span></div>
         <div class="stat" id="stat-dist-wrap"><span class="stat-label">距离</span><span id="stat-dist" class="stat-value">0</span></div>
         <div class="stat"><span class="stat-label">本局金币</span><span id="stat-coins" class="stat-value">0</span></div>
-        <div class="stat"><span class="stat-label">余额</span><span id="stat-wallet" class="stat-value">0 💰</span></div>
+        <div class="stat"><span class="stat-label">余额</span><span id="stat-wallet" class="stat-value">0 <span class="svg-icon" data-icon="money"></span></span></div>
       </div>
       <div class="hud-buttons">
-        <button id="btn-minimap" class="icon-btn" title="小地图 (M)">🗺</button>
+        <button id="btn-minimap" class="icon-btn" title="小地图 (M)"><span class="svg-icon" data-icon="map"></span></button>
         <button id="btn-fullscreen" class="icon-btn" title="全屏">⛶</button>
         <button id="btn-settings-hud" class="icon-btn" title="设置">⚙</button>
-        <button id="btn-pause" class="icon-btn" title="暂停 (P)">⏸</button>
+        <button id="btn-pause" class="icon-btn" title="暂停 (P)"><span class="svg-icon" data-icon="pause"></span></button>
       </div>
     </div>
 
@@ -124,7 +124,7 @@
       <div class="minimap-wrap">
         <canvas id="minimap" width="200" height="200"></canvas>
         <div id="minimap-lock" class="minimap-lock">
-          <div class="minimap-lock-icon">🗺️</div>
+          <div class="minimap-lock-icon"><span class="svg-icon" data-icon="map"></span></div>
           <div class="minimap-lock-text">未找到地图</div>
           <div id="minimap-lock-hint" class="minimap-lock-hint hidden"></div>
         </div>
@@ -139,7 +139,7 @@
 
     <!-- 右下：动作按钮 -->
     <div class="hud-bottom-right">
-      <button id="btn-items" class="action-btn">🎒 道具</button>
+      <button id="btn-items" class="action-btn"><span class="svg-icon" data-icon="bag"></span> 道具</button>
       <button id="btn-cancel-path" class="action-btn danger hidden">取消寻路</button>
     </div>
 
@@ -266,7 +266,7 @@
   <!-- ================= 胜利界面 ================= -->
   <div id="win-screen" class="screen hidden">
     <div class="panel panel-narrow win-panel">
-      <h2 class="win-title">🎉 恭喜到达终点！</h2>
+      <h2 class="win-title"><span class="svg-icon" data-icon="party"></span> 恭喜到达终点！</h2>
       <div id="win-newrecord" class="new-record hidden">新纪录！</div>
       <ul class="win-stats">
         <li><span>用时</span><b id="win-time">-</b></li>
@@ -276,7 +276,7 @@
         <li><span>金币入账</span><b id="win-coins">-</b></li>
         <li><span>最佳记录</span><b id="win-best">-</b></li>
       </ul>
-      <div id="win-ranking" class="win-ranking hidden">🏅 进入排行榜</div>
+      <div id="win-ranking" class="win-ranking hidden"><span class="svg-icon" data-icon="medal"></span> 进入排行榜</div>
       <div class="btn-row">
         <button id="btn-play-again" class="primary-btn">再玩一次</button>
         <button id="btn-win-menu" class="secondary-btn">返回主菜单</button>
@@ -288,7 +288,7 @@
   <!-- ================= 成就 ================= -->
   <div id="achievement-screen" class="screen hidden">
     <div class="panel panel-narrow">
-      <h2 class="panel-title">🏆 成就</h2>
+      <h2 class="panel-title"><span class="svg-icon" data-icon="trophy"></span> 成就</h2>
       <ul id="achievements-list" class="record-list achievements-page-list"></ul>
       <div class="btn-row">
         <button id="btn-achievements-back" class="primary-btn">返回</button>
@@ -299,7 +299,7 @@
   <!-- ================= 本地排行榜 ================= -->
   <div id="ranking-screen" class="screen hidden">
     <div class="panel panel-narrow">
-      <h2 class="panel-title">🏆 本地排行榜</h2>
+      <h2 class="panel-title"><span class="svg-icon" data-icon="trophy"></span> 本地排行榜</h2>
       <div id="ranking-tabs" class="ranking-tabs">
         <button class="ranking-tab selected" data-diff="simple">简单</button>
         <button class="ranking-tab" data-diff="medium">中等</button>
@@ -316,8 +316,8 @@
   <!-- ================= 商店 ================= -->
   <div id="shop-screen" class="screen hidden">
     <div class="panel shop-panel">
-      <h2 id="shop-title" class="panel-title">🏪 商店</h2>
-      <div class="shop-balance">💰 金币余额：<b id="shop-coins">0</b></div>
+      <h2 id="shop-title" class="panel-title"><span class="svg-icon" data-icon="shop"></span> 商店</h2>
+      <div class="shop-balance"><span class="svg-icon" data-icon="money"></span> 金币余额：<b id="shop-coins">0</b></div>
       <div id="shop-list" class="shop-list"></div>
       <div class="btn-row">
         <button id="btn-shop-back" class="primary-btn">返回</button>
@@ -328,7 +328,7 @@
   <!-- ================= 道具面板 ================= -->
   <div id="item-panel" class="screen hidden">
     <div class="panel panel-narrow item-panel">
-      <h2 class="panel-title">🎒 道具</h2>
+      <h2 class="panel-title"><span class="svg-icon" data-icon="bag"></span> 道具</h2>
       <ul id="item-list" class="item-list"></ul>
       <p class="muted item-panel-hint">
         点击「使用」消耗一次；面板打开时游戏暂停。<br />
@@ -340,7 +340,7 @@
   <!-- ================= 幽灵询问弹窗 ================= -->
   <div id="ghost-modal" class="screen hidden">
     <div class="panel panel-narrow ghost-panel">
-      <h2 class="panel-title">👻 发现你的历史挑战</h2>
+      <h2 class="panel-title"><span class="svg-icon" data-icon="ghost"></span> 发现你的历史挑战</h2>
       <p id="ghost-modal-info" class="ghost-info"></p>
       <p class="muted ghost-msg">
         上次你走完了这个种子。<br />
@@ -360,7 +360,7 @@
   <!-- ================= 隐藏彩蛋（长按商店按钮触发） ================= -->
   <div id="secret-modal" class="screen hidden">
     <div class="panel panel-narrow secret-panel">
-      <h2 class="panel-title">🤫 隐藏彩蛋</h2>
+      <h2 class="panel-title"><span class="svg-icon" data-icon="shush"></span> 隐藏彩蛋</h2>
       <p class="secret-question">本游戏的AI制作者是谁？</p>
       <p class="muted secret-note">答对奖励 99,999 金币 · 答案区分大小写</p>
       <input id="secret-input" class="text-input secret-input" type="text" placeholder="输入答案…"
@@ -376,8 +376,8 @@
   <div id="replay-bar" class="replay-bar hidden">
     <button id="btn-replay-exit" class="mini-btn">✖ 退出</button>
     <span id="replay-time" class="replay-time">0.0s / 0.0s</span>
-    <button id="btn-replay-pause" class="mini-btn">⏸ 暂停</button>
-    <button id="btn-replay-view" class="mini-btn">🎥 跟随</button>
+    <button id="btn-replay-pause" class="mini-btn"><span class="svg-icon" data-icon="pause"></span> 暂停</button>
+    <button id="btn-replay-view" class="mini-btn"><span class="svg-icon" data-icon="camera"></span> 跟随</button>
   </div>
 
 </div>
@@ -385,6 +385,8 @@
 <!-- ================= 脚本（按依赖顺序加载） ================= -->
 <!-- Three.js r160 UMD 本地版：支持 file:// 直接打开；若需 ES Module 版见 assets/three.module.js -->
 <script src="assets/three.min.js"></script>
+<!-- 图标库必须早于 settings.js：settings/audio 之后任何模块都可能触发首次图标填充 -->
+<script src="js/icons.js"></script>
 <script src="js/settings.js"></script>
 <script src="js/audio.js"></script>
 <script src="js/maze.js"></script>

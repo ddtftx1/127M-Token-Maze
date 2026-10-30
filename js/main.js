@@ -53,6 +53,7 @@
     _portalAccum: 0,      // 传送门环境音触发节流
     _startPending: false,
     _achieveToastTimer: null, // 通关后延迟弹出成就提示的定时器（离开本局时清理）
+    _pendingAchieveToast: null, // 待播报的成就名（定时器被取消时由 backToMenu / buildLevel 补发）
     _renderStopped: false // 渲染致命错误后停止循环
   };
 
@@ -386,7 +387,7 @@
     if (Game._pendingGhost && Game._pendingGhost.length > 1) {
       Game.ghostFrames = Game._pendingGhost;
       if (MG.Replay) Game.ghost = MG.Replay.createGhost(Game.scene);
-      MG.UI.toast('👻 幽灵已就位，和它比一比吧', 2400);
+      MG.UI.toast(MG.UI.iconHtml('ghost') + ' 幽灵已就位，和它比一比吧', 2400, true);
     }
     Game._pendingGhost = null;
 
@@ -409,6 +410,12 @@
     Game.clock.getDelta(); // 丢弃加载期间累积的时间
 
     MG.UI.toast('种子：' + Game.seed + '  难度：' + diff.name, 2200);
+
+    // 上一局通关解锁、但玩家抢在 1.2 秒内点了「再玩一次」的成就，等开局种子 toast
+    // 消失（2200ms）后再补发，避免两条 toast 互相覆盖（BUG-020）
+    if (Game._pendingAchieveToast) {
+      setTimeout(function () { flushAchieveToast(); }, 2200);
+    }
   }
 
   /** 各主题的平行光（太阳）颜色：科技冷白 / 地牢暖黄 / 森林偏绿白 */
@@ -545,8 +552,10 @@
 
     Game.usedAutoPath = true;
     if (MG.Audio) MG.Audio.pathStart();
-    var name = kind === 'best' ? '🧭 最佳路径' : '⚡ 最快路径';
-    MG.UI.toast(name + '启动' + (limit && kind === 'best' ? '（本次限 ' + limit + ' 格）' : ''), 2200);
+    var name = kind === 'best'
+      ? MG.UI.iconHtml('compass') + ' 最佳路径'
+      : MG.UI.iconHtml('bolt') + ' 最快路径';
+    MG.UI.toast(name + '启动' + (limit && kind === 'best' ? '（本次限 ' + limit + ' 格）' : ''), 2200, true);
     return true;
   }
 
@@ -771,6 +780,8 @@
 
   function backToMenu() {
     clearAchieveToastTimer();
+    // 回到菜单后不再有"下一局开局 toast"可用，挂起的成就必须在这里补发
+    flushAchieveToast();
     if (Game.itemPanelOpen) {
       Game.itemPanelOpen = false;
       MG.UI.hideItemPanel();
@@ -869,22 +880,37 @@
     if (MG.Audio) MG.Audio.win();
 
     if (newAchievements.length > 0) {
-      // 记住定时器 id：若玩家在 1.2 秒内返回菜单 / 重开 / 再玩一次，要能取消掉
+      // 先挂起：玩家可能在 1.2 秒内就点「再玩一次 / 返回主菜单」，定时器会被 clearAchieveToastTimer()
+      // 取消，原先会连成就音效和提示一起丢掉（BUG-020）。挂起后由 backToMenu() 或下一局
+      // buildLevel() 在合适时机补发。
+      Game._pendingAchieveToast = newAchievements.slice();
       if (Game._achieveToastTimer) clearTimeout(Game._achieveToastTimer);
       Game._achieveToastTimer = setTimeout(function () {
         Game._achieveToastTimer = null;
-        MG.UI.toast('🏆 解锁成就：' + newAchievements.join('、'), 3000);
-        if (MG.Audio) MG.Audio.achieve();
+        flushAchieveToast();
       }, 1200);
     }
   }
 
-  /** 取消通关后延迟弹出的成就提示（避免 toast 掉到菜单 / 新一局里） */
+  /**
+   * 取消通关后延迟弹出的成就提示定时器。
+   * 只清定时器，**不清** Game._pendingAchieveToast —— 成就确实解锁了，
+   * 只是还没播报；清掉挂起数据等于把提示和音效永久丢失（BUG-020）。
+   */
   function clearAchieveToastTimer() {
     if (Game._achieveToastTimer) {
       clearTimeout(Game._achieveToastTimer);
       Game._achieveToastTimer = null;
     }
+  }
+
+  /** 立刻播报挂起的成就（toast + 音效），并清空挂起状态；无挂起时什么都不做 */
+  function flushAchieveToast() {
+    var list = Game._pendingAchieveToast;
+    if (!list || !list.length) return;
+    Game._pendingAchieveToast = null;
+    MG.UI.toast(MG.UI.iconHtml('trophy') + ' 解锁成就：' + list.join('、'), 3000, true);
+    if (MG.Audio) MG.Audio.achieve();
   }
 
   /* ------------------------------------------------------------
@@ -1291,12 +1317,59 @@
   /* ------------------------------------------------------------
    * 启动
    * ---------------------------------------------------------- */
+  /* ------------------------------------------------------------
+   * 老内核降级（Chrome 49 / Win7）
+   * ---------------------------------------------------------- */
+  /**
+   * 特性检测 → 给 body 挂 legacy-* class，配合 css/style.css 末尾的降级规则。
+   * 只做能力检测（CSS.supports），不猜 UA：Win7 上的浏览器版本差异很大，
+   * UA 判定一旦猜错就是"布局全乱"，而能力检测不会。
+   *
+   * 注意 legacy-gap 的精度限制：CSS.supports 只能验证"属性是否存在"，
+   * Chrome 57~83 的 grid 已支持 gap、flex 还没支持，这里会误判为支持。
+   * 那种环境下 flex 子元素只是贴在一起（无间距），不会错位，属于可接受降级。
+   */
+  function applyLegacyClasses() {
+    if (!document.body) return;
+    var supports = (window.CSS && window.CSS.supports) ? window.CSS.supports : null;
+    function ok(a, b) {
+      if (!supports) return false; // 连 CSS.supports 都没有：一律按"不支持"降级
+      try { return b === undefined ? supports(a) : supports(a, b); }
+      catch (e) { return false; }
+    }
+    var flags = {
+      // env(safe-area-inset-*)：不支持时 --safe-* 代入会让整条 calc() 失效
+      'legacy-env': !ok('(padding: env(safe-area-inset-top))'),
+      // inset 简写：Chrome 87+
+      'legacy-inset': !ok('inset', '0'),
+      // flex gap：Chrome 84+
+      'legacy-gap': !ok('gap', '1px'),
+      // 100dvh：Chrome 108+
+      'legacy-dvh': !ok('height', '100dvh')
+    };
+    var classes = [];
+    for (var cls in flags) {
+      if (!Object.prototype.hasOwnProperty.call(flags, cls)) continue;
+      if (flags[cls]) classes.push(cls);
+    }
+    for (var i = 0; i < classes.length; i++) {
+      document.body.classList.add(classes[i]);
+    }
+  }
+
   function boot() {
+    // 0) 先在 body 上落降级 class：早于任何面板渲染，避免先按现代样式画一遍再跳变
+    applyLegacyClasses();
+
     // 1) 先加载设置（localStorage）
     MG.Settings.load();
 
     // 2) 初始化 UI（绑定按钮）
     MG.UI.init();
+
+    // 2.1) 填充静态标记里的内联图标：<span data-icon="trophy"></span> → 真实 svg
+    //      动态生成的列表（排行榜 / 商店 / 成就）在各自渲染函数里用 MG.UI.iconHtml() 直接拼
+    if (MG.UI.fillIcons) MG.UI.fillIcons();
 
     // 3) Three.js
     if (!initThree()) return;
@@ -1327,6 +1400,14 @@
       else if (Game.state === 'playing') pauseGame();
       else if (Game.state === 'paused') resumeGame();
     };
+    // 回放模式：点击画面 / 按 P = 暂停继续（不请求指针锁定）
+    // 状态判断留在 main 侧，input.js 只负责回调，保持"模块顺序即依赖顺序"，不反向依赖 Game
+    Game.input.onToggleReplayPause = function () {
+      if (Game.state === 'replay') toggleReplayPause();
+    };
+    // 供 input.js 只读查询当前状态（决定点击是否该请求 Pointer Lock）
+    Game.input.getState = function () { return Game.state; };
+
     Game.input.onRestart = function () {
       if (Game.state === 'playing' || Game.state === 'paused' || Game.state === 'win') restartGame();
     };

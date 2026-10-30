@@ -64,7 +64,10 @@ html, body {
   height: 100%;
   overflow: hidden;
   position: fixed;          /* 移动端防止地址栏抖动与回弹 */
-  inset: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
   background: var(--bg);
   color: var(--text);
   font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei",
@@ -75,14 +78,36 @@ html, body {
 
 #app {
   position: absolute;
-  inset: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
   overflow: hidden;
+}
+
+/* ---------- 内联 SVG 图标（替代 Emoji，源码见 js/icons.js） ----------
+   尺寸跟随文字大小（1em），基线与小写字母对齐（-0.125em 是常见的文字基线补偿）。
+   Noto 的 svg 只有 viewBox、没有 width/height，必须显式给 100%，
+   否则不同浏览器会按 300×150 之类的默认尺寸渲染。 */
+.svg-icon {
+  width: 1em;
+  height: 1em;
+  vertical-align: -0.125em;
+  display: inline-block;
+}
+.svg-icon > svg {
+  width: 100%;
+  height: 100%;
+  display: block;
 }
 
 /* 3D 画布 */
 #game-canvas {
   position: absolute;
-  inset: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
   width: 100%;
   height: 100%;
   display: block;
@@ -93,7 +118,10 @@ html, body {
 /* 视角触控层：铺满全屏，但 HUD 元素层级更高（pointer-events:auto 时才会拦截） */
 #look-layer {
   position: absolute;
-  inset: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
   z-index: 5;
   touch-action: none;
 }
@@ -103,7 +131,10 @@ html, body {
 
 .screen {
   position: absolute;
-  inset: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
   z-index: 40;
   display: flex;
   align-items: center;
@@ -328,7 +359,10 @@ html, body {
    ============================================================ */
 #hud {
   position: absolute;
-  inset: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
   z-index: 20;
   pointer-events: none;    /* 默认不拦截，具体控件单独开启 */
 }
@@ -466,7 +500,10 @@ html, body {
 /* 未找到地图时的暗色占位 */
 .minimap-lock {
   position: absolute;
-  inset: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
   border-radius: 14px;
   display: flex;
   flex-direction: column;
@@ -505,7 +542,10 @@ html, body {
 }
 .joystick-base {
   position: absolute;
-  inset: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
   border-radius: 50%;
   background: radial-gradient(circle, rgba(30, 48, 72, 0.55), rgba(8, 14, 24, 0.7));
   border: 2px solid rgba(120, 190, 255, 0.24);
@@ -1082,7 +1122,11 @@ html, body {
    - 游戏内 HUD：状态栏单行、四角控件缩尺寸但不移位
    竖屏与高度 > 640 的横屏一律不进入本块。
    ============================================================ */
-@media (orientation: landscape) and (max-height: 640px) {
+/* 关键：必须同时满足 (hover: none) and (pointer: coarse)。
+   否则桌面浏览器窗口高度 ≤640（如 Win7 退出全屏后）会误命中，
+   页面被切换成手机横屏的紧凑布局 —— 这就是"退出全屏变紧凑版 + 右侧白条"的来源。
+   hover / pointer 媒体特性 Chrome 41+ 支持，老内核照样能正确判定。 */
+@media (orientation: landscape) and (max-height: 640px) and (hover: none) and (pointer: coarse) {
 
   /* 通用面板：限高、允许内部滚动 */
   .screen { padding: calc(6px + var(--safe-t)) calc(6px + var(--safe-r))
@@ -1256,6 +1300,16 @@ html, body {
   .replay-time { min-width: 96px; font-size: 12px; }
 }
 
+/* 100dvh 在 Chrome 108 之前整体无效：上面每条限高规则都已保留 100vh 兜底声明，
+   这里再给不支持 dvh 的内核显式覆盖一遍，防止以后有人只写 dvh 忘了配 vh */
+@media (orientation: landscape) and (max-height: 640px) and (hover: none) and (pointer: coarse) {
+  body.legacy-dvh .panel { max-height: calc(100vh - 12px - var(--safe-t) - var(--safe-b)); }
+  body.legacy-dvh .settings-scroll { max-height: calc(100vh - 130px - var(--safe-t) - var(--safe-b)); }
+  body.legacy-dvh .ranking-list,
+  body.legacy-dvh .achievements-page-list { max-height: calc(100vh - 200px - var(--safe-t) - var(--safe-b)); }
+  body.legacy-dvh .shop-list { max-height: calc(100vh - 170px - var(--safe-t) - var(--safe-b)); }
+}
+
 /* ============================================================
    色盲友好模式（body[data-colorblind="1"]）
    红绿色盲最常见：用「蓝-橙」高对比替代「青-绿」主色，
@@ -1275,3 +1329,44 @@ body[data-colorblind="1"] .shop-price,
 body[data-colorblind="1"] .item-count {
   font-weight: 800;
 }
+
+/* ============================================================
+   老内核降级（Chrome 49 / Win7 等）
+   ------------------------------------------------------------
+   由启动时的特性检测（js/main.js → applyLegacyClasses）给 body 加 class，
+   只在对应特性"确实不支持"时生效，现代浏览器完全不受影响：
+     body.legacy-env   不支持 env(safe-area-inset-*) → 安全区按 0 处理
+     body.legacy-inset 不支持 inset 简写        → 已在上面全部展开为四边 longhand
+     body.legacy-gap   不支持 flex 的 gap       → 用 margin 回退
+     body.legacy-dvh   不支持 100dvh            → 见上方 100vh 覆盖
+   ============================================================ */
+
+/* ---------- 安全区降级 ----------
+   老内核里 env() 无法解析，var(--safe-t) 代入后整条 calc() 变成无效值，
+   padding / top / max-height 会被重置为初始值（常见表现：面板贴边、
+   页面右侧多出一条整页滚动条）。
+   这里直接把四个变量按 0 处理 —— 等价于逐条写死数值（.toast { bottom: 34% }、
+   .hud-top { top: 8px } 之类），但不用为每个 calc() 复制一份规则。 */
+body.legacy-env {
+  --safe-t: 0px;
+  --safe-b: 0px;
+  --safe-l: 0px;
+  --safe-r: 0px;
+}
+/* 文档点名的两处再显式兜一层：不依赖变量替换，便于老内核上直接排错 */
+body.legacy-env .hud-top { top: 8px; left: 8px; right: 8px; }
+body.legacy-env .toast { bottom: 34%; }
+
+/* ---------- flex gap 降级 ----------
+   Chrome 84 之前 flex 容器不支持 gap（grid 的 gap 更晚），子元素之间没有间距。
+   用相邻兄弟选择器补 margin，间距值对齐默认（非横屏紧凑）布局。 */
+body.legacy-gap .diff-list > * + * { margin-top: 10px; }
+body.legacy-gap .record-list > * + * { margin-top: 6px; }
+body.legacy-gap .menu-vertical > * + * { margin-top: 12px; }
+body.legacy-gap .btn-row > * + * { margin-left: 8px; }
+body.legacy-gap .win-stats > * + * { margin-top: 6px; }
+body.legacy-gap .ranking-list > * + * { margin-top: 4px; }
+body.legacy-gap .shop-list > * + * { margin-top: 8px; }
+body.legacy-gap .item-list > * + * { margin-top: 8px; }
+body.legacy-gap .hud-stats > * + * { margin-left: 5px; }
+body.legacy-gap .hud-buttons > * + * { margin-left: 5px; }

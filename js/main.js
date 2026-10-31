@@ -593,7 +593,9 @@
           if (!c.collected) targets.push({ x: c.x, y: c.y });
         }
       }
-      if (view.mapItem && !view.mapItem.collected && !Game.mapFound) {
+      // BUG-022：不再用 !Game.mapFound 过滤 —— 小地图已解锁时卷轴依然可拾取（进背包留给下一局），
+      // 若继续过滤，「最佳路径」就不会绕路去捡它，与本局实际可拾取的行为不一致。
+      if (view.mapItem && !view.mapItem.collected) {
         targets.push({ x: view.mapItem.x, y: view.mapItem.y });
       }
     }
@@ -1120,25 +1122,39 @@
           MG.UI.toast('+' + got + ' 金币（' + Game.collectedCoins + '/' + Game.mazeView.totalCoins + '）', 1000);
         }
 
-        /* 6.5) 地图道具拾取：只进背包，不直接解锁小地图
+        /* 6.5) 地图道具拾取：入库；小地图是否已解锁，只影响"要不要刷新小地图状态"
          *
          * 设计变更（2026-10-30）：拾取 = mapUnlock 库存 +1，解锁动作交给玩家在道具面板里主动执行，
-         * 走 useItem('mapUnlock') 那条既有分支。因此这里**不设置** Game.mapFound：
-         *   - 小地图锁定占位继续显示（ui.js updateMinimapLock 的 locked 分支）；
-         *   - HUD 距离信息、指南针距离继续隐藏（updateHud 里 applyDistanceVisibility(mapFound)）；
-         *   - 小地图不绘制（drawMinimap 里 !mapFound 直接 return）。
+         * 走 useItem('mapUnlock') 那条既有分支，因此拾取本身**不设置** Game.mapFound。
+         *
+         * BUG-022（2026-10-31）：这里原先写成
+         *     if (!Game.mapFound && Game.mazeView.tryCollectMap(...))
+         * 那个 && 短路导致"先用道具解锁小地图、再走到卷轴处"时整个分支不执行：
+         * 卷轴既不消失也不入库，看起来像一张只会转圈的贴图。
+         * A 改造前 mapFound 只在拾取那一刻才置 true，这条路径不可达；改造后可达了，守卫就成了死条件。
+         * 现在把 mapFound 的角色从"是否进入分支"降级为"是否刷新小地图状态"。
+         *
+         * 注意：本局已解锁时**绝不能**调用 updateMinimapLock(true, …)，
+         * 那会把已解锁的小地图重新锁上（HUD 距离信息与指南针距离一起消失），比原 bug 更严重。
+         *
          * 库存与商店购买的 mapUnlock 共用同一份钱包，面板数量是合并后的值。 */
-        if (!Game.mapFound && Game.mazeView.tryCollectMap(Game.player.pos.x, Game.player.pos.z, 1.2)) {
+        if (Game.mazeView.tryCollectMap(Game.player.pos.x, Game.player.pos.z, 1.2)) {
           var mapItemAdded = !!(MG.Shop && MG.Shop.addItem && MG.Shop.addItem('mapUnlock', 1));
           if (!mapItemAdded) console.warn('[game] 地图道具入库失败（钱包不可写），本局仍按已拾取处理');
 
           if (MG.Audio) MG.Audio.mapFound();
-          MG.UI.toast('已获得地图道具，可在道具面板中使用', 2600);
 
-          // 方位提示已失效：道具被拿走了，留着"地图在东侧"只会误导玩家。
-          // 小地图仍是锁定状态，这里只把提示行清空（中等/困难本来就没有提示，不受影响）。
-          Game.mapHint = '';
-          MG.UI.updateMinimapLock(true, Game.mapHint);
+          if (Game.mapFound) {
+            // 本局已经解锁（玩家先用道具开了小地图）：只入库，小地图状态一个字都不动。
+            // 道具留到下一局用 —— 本局再用会走 useItem 的"本局已解锁，无需重复使用"分支。
+            MG.UI.toast('已获得地图道具（库存 +1）', 2600);
+          } else {
+            MG.UI.toast('已获得地图道具，可在道具面板中使用', 2600);
+            // 方位提示已失效：道具被拿走了，留着"地图在东侧"只会误导玩家。
+            // 小地图仍是锁定状态，这里只把提示行清空（中等/困难本来就没有提示，不受影响）。
+            Game.mapHint = '';
+            MG.UI.updateMinimapLock(true, Game.mapHint);
+          }
 
           updateHudData(); // 库存数变了：刷新 HUD 的道具数量与钱包
         }

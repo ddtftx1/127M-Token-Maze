@@ -1,0 +1,1 @@
+/data/data/com.termux/files/usr/var/lib/proot-distro/containers/ubuntu/rootfs/.l2s/.l2s.README.md.tmp0001

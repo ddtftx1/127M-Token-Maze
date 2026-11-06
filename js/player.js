@@ -186,12 +186,26 @@
     }
     // 若两轴都被挡（贴墙滑行失败），改用"逐轴 + 递减步长"补偿，避免整步挤进墙角
     if (!moved && (Math.abs(dx) > 1e-6 || Math.abs(dz) > 1e-6)) {
+      // 补偿步长：X / Z 各自独立判定（旧写法 X 一成功就 break，斜向贴墙时会丢掉 Z 分量，
+      // 表现为"只沿 X 滑、不沿 Z 滑"）。这里分别记录两个轴能走的最大比例，最后一起应用。
+      var stepX = 0, stepZ = 0;
+      // doneX/doneZ 表示"这个轴已经有结果了"（找到可用步长，或本来就没有分量）。
+      // 注意不能用 stepX===0 当"已完成"：那会被当成没找到，导致刚进循环就 break。
+      var doneX = Math.abs(dx) <= 1e-6;
+      var doneZ = Math.abs(dz) <= 1e-6;
       for (var k = 0.5; k > 0.05; k -= 0.15) {
-        var sx = this.pos.x + dx * k;
-        if (!this.collides(sx, this.pos.z)) { this.pos.x = sx; moved = true; break; }
-        var sz = this.pos.z + dz * k;
-        if (!this.collides(this.pos.x, sz)) { this.pos.z = sz; moved = true; break; }
+        if (!doneX) {
+          var sx = this.pos.x + dx * k;
+          if (!this.collides(sx, this.pos.z)) { stepX = dx * k; doneX = true; }
+        }
+        if (!doneZ) {
+          var sz = this.pos.z + dz * k;
+          if (!this.collides(this.pos.x + stepX, sz)) { stepZ = dz * k; doneZ = true; }
+        }
+        if (doneX && doneZ) break;
       }
+      if (stepX) { this.pos.x += stepX; moved = true; }
+      if (stepZ) { this.pos.z += stepZ; moved = true; }
     }
     return moved;
   };

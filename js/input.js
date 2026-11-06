@@ -174,8 +174,12 @@
           var dy = t.clientY - self._lookLast.y;
           self._lookLast.x = t.clientX;
           self._lookLast.y = t.clientY;
-          self.lookDX += dx;
-          self.lookDY += dy;
+          // 只有 playing 态才消费视角增量（main.js 的 loop 也只在该态读取）。
+          // 否则回放 / 暂停 / 结算界面里拖拽会一直累积，回主菜单再开局时首帧视角突跳。
+          if (!self.getState || self.getState() === 'playing') {
+            self.lookDX += dx;
+            self.lookDY += dy;
+          }
         }
       }
     }, { passive: false });
@@ -240,16 +244,11 @@
       self.keys[k] = false;
     });
 
-    // 窗口失焦时清空按键，避免"卡住不动"
+    // 窗口失焦时清空全部输入，避免"卡住不动"。
+    // 统一走 resetInputs()：原先这里手写了一份清理，漏掉 lookDX/lookDY，
+    // 残量会在重新聚焦后补一次视角跳变；两条清理路径分开维护也容易漂移。
     window.addEventListener('blur', function () {
-      self.keys = {};
-      self.moveX = 0;
-      self.moveY = 0;
-      self._joyId = null;
-      // _lookId 必须一并清理：否则切后台/来电后残留的 identifier 会让之后
-      // 所有新手指出于不匹配被忽略，表现为"能走但转不了头"（BUG-013）
-      self._lookId = null;
-      self._resetKnob();
+      self.resetInputs();
     });
 
     /* ---------- 鼠标：Pointer Lock（标准第一人称交互） ----------
@@ -294,6 +293,8 @@
     window.addEventListener('mousemove', function (e) {
       // 只有锁定状态才转视角：movementX/Y 是原始位移，鼠标可无限移动，不会撞到窗口边缘
       if (!self.pointerLocked) return;
+      // 与触摸同一条规则：非 playing 态不累积，避免残留到下一局首帧
+      if (self.getState && self.getState() !== 'playing') return;
       self.lookDX += e.movementX || 0;
       self.lookDY += e.movementY || 0;
     });

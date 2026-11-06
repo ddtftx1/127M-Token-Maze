@@ -1,0 +1,1345 @@
+/* ============================================================
+ * js/dev.js
+ * 开发者选项（MG.Dev）—— 仅在通过两题验证后、本会话内可用
+ *
+ * 定位：一个"测试台"，用来快速验证图标 / 音频 / 视觉 / 玩法 / 存档 / 环境 / 日志，
+ * 并提供「空关卡沙盒」用于新功能试作（沙盒内道具面板会多出生成器入口）。
+ *
+ * 硬约束：
+ * - ES5（var / function / IIFE）+ 无第三方依赖；Chrome 49 / Win7 可用
+ * - 样式与逻辑都不使用 CSS Grid、flex gap、ES6+ 语法（老内核同样能开）
+ * - 解锁状态只存内存（本会话有效），不写 localStorage
+ * - 面板内静音只包装 MG.Audio 方法，**不修改设置**；退出即原样恢复
+ * ============================================================ */
+(function (global) {
+  'use strict';
+
+  var MG = global.MG = global.MG || {};
+
+  /* ------------------------------------------------------------
+   * 常量
+   * ---------------------------------------------------------- */
+  var LOG_MAX = 100;              // 日志环形缓冲上限
+  var STATUS_MS = 4000;           // 状态条自动消失时间
+  var CHECKIN_KEY = 'maze3d.checkin.v1';
+  var LEGACY_CLASSES = ['legacy-env', 'legacy-inset', 'legacy-gap', 'legacy-dvh'];
+  /** 真正会发声的音效（顺序即展示顺序） */
+  var AUDIO_SFX = [
+    'click', 'step', 'pathStart', 'pathCancel', 'coin',
+    'purchase', 'mapFound', 'error', 'win', 'achieve', 'portal'
+  ];
+  /** 不发声的工具方法（unlock 只做 resume，syncVolume 只设增益） */
+  var AUDIO_UTIL = ['unlock', 'syncVolume'];
+  /** 带节流的音效：短时间内连点会被内部丢弃，不是坏了 */
+  var AUDIO_THROTTLED = { step: '380ms 节流（防脚步叠音）' };
+  /** 图标 key → 用途说明（与 js/icons.js 的顺序一致） */
+  var ICON_LABELS = {
+    trophy: '排行榜 / 成就', shop: '商店', map: '小地图', bag: '道具背包',
+    ghost: '幽灵对手', money: '金币', compass: '最佳路径', bolt: '最快路径',
+    calendar: '每日挑战', party: '胜利 / 庆祝', shush: '隐藏入口',
+    pause: '暂停', medal: '名次奖牌', check: '已解锁 / 已签',
+    lock: '未解锁 / 未来格', camera: '回放跟随',
+    shield: '签到护符', alarm: '每日签到'
+  };
+
+  /* ------------------------------------------------------------
+   * 状态
+   * ---------------------------------------------------------- */
+  var unlocked = false;           // 本会话是否已通过验证（不落盘）
+  var panelOpen = false;
+  var activeTab = 'icons';
+  var statusKind = '';
+  var statusMsg = '';
+  var statusTimer = null;
+  var audioBackup = null;         // 静音前的原始 MG.Audio 方法
+  var logs = [];                  // {t, level, text}
+  var logSeq = 0;
+  var consoleHooked = false;
+  var els = {};
+  var fps = { raf: 0, frames: 0, last: 0, value: 0, running: false };
+
+  /* 沙盒 */
+  var sandboxPending = false;     // 下一次开局走沙盒
+  var sandboxActive = false;      // 当前这一局是沙盒
+  var sandboxAutoMap = true;      // 沙盒里自动解锁小地图
+
+  /* ------------------------------------------------------------
+   * 小工具
+   * ---------------------------------------------------------- */
+  function $(id) { return document.getElementById(id); }
+
+  function trim(s) { return String(s === undefined || s === null ? '' : s).replace(/^\s+|\s+$/g, ''); }
+
+  function esc(s) {
+    return String(s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  function icon(k) { return (MG.UI && MG.UI.iconHtml) ? MG.UI.iconHtml(k) : ''; }
+
+  function pad2(n) { return n < 10 ? '0' + n : '' + n; }
+
+  function ymd(d) { return '' + d.getFullYear() + pad2(d.getMonth() + 1) + pad2(d.getDate()); }
+
+  function setStatus(kind, msg) {
+    statusKind = kind;
+    statusMsg = msg;
+    var node = els['dev-status'];
+    if (node) {
+      node.className = 'dev-status' + (kind === 'ok' ? ' is-ok' : (kind === 'err' ? ' is-err' : ''));
+      node.textContent = msg || '';
+    }
+    if (statusTimer) clearTimeout(statusTimer);
+    statusTimer = setTimeout(function () {
+      statusTimer = null;
+      if (!els['dev-status']) return;
+      els['dev-status'].className = 'dev-status';
+      els['dev-status'].textContent = '';
+    }, STATUS_MS);
+  }
+
+  function safeGet(key) {
+    try { return global.localStorage.getItem(key); } catch (e) { return null; }
+  }
+  function safeSet(key, val) {
+    try { global.localStorage.setItem(key, val); return true; } catch (e) { return false; }
+  }
+  function safeDel(key) {
+    try { global.localStorage.removeItem(key); return true; } catch (e) { return false; }
+  }
+
+  function storageKeys() {
+    var out = [];
+    try {
+      for (var i = 0; i < global.localStorage.length; i++) {
+        var k = global.localStorage.key(i);
+        if (k) out.push(k);
+      }
+    } catch (e) { /* 存储不可用 */ }
+    out.sort();
+    return out;
+  }
+
+  function sizeOf(text) {
+    if (!text) return 0;
+    if (typeof text.length === 'number') return text.length;
+    return 0;
+  }
+
+  /* ------------------------------------------------------------
+   * 复制：优先剪贴板 API，失败退化为"给出可选中的文本框"
+   * （项目要支持 file:// 双击打开，那种协议下 clipboard API 常常不可用）
+   * ---------------------------------------------------------- */
+  function copyText(text, label) {
+    var done = false;
+    try {
+      if (global.navigator && global.navigator.clipboard && global.navigator.clipboard.writeText) {
+        global.navigator.clipboard.writeText(text);
+        done = true;
+      }
+    } catch (e) { done = false; }
+    if (!done) {
+      // 退路一：临时 textarea + execCommand
+      try {
+        var ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.left = '-9999px';
+        document.body.appendChild(ta);
+        ta.select();
+        done = document.execCommand && document.execCommand('copy');
+        document.body.removeChild(ta);
+      } catch (e2) { done = false; }
+    }
+    if (done) {
+      setStatus('ok', '已复制：' + (label || '内容'));
+    } else {
+      // 退路二：把内容展示到一个可选中的文本框里，让玩家自己长按复制
+      var box = $('dev-clip');
+      if (box) {
+        box.value = text;
+        box.style.display = 'block';
+        try { box.focus(); box.select(); } catch (e3) { /* 忽略 */ }
+        setStatus('err', '剪贴板不可用，已把内容放进下方文本框，请手动复制');
+      } else {
+        setStatus('err', '剪贴板不可用');
+      }
+    }
+  }
+
+  /* ------------------------------------------------------------
+   * 音频静音：只包装 MG.Audio 的方法，不碰 MG.Settings
+   * ---------------------------------------------------------- */
+  function muteAudio() {
+    if (audioBackup || !MG.Audio) return;
+    var backup = {};
+    for (var k in MG.Audio) {
+      if (!Object.prototype.hasOwnProperty.call(MG.Audio, k)) continue;
+      if (typeof MG.Audio[k] !== 'function') continue;
+      backup[k] = MG.Audio[k];
+      MG.Audio[k] = function () { };
+    }
+    audioBackup = backup;
+  }
+
+  function unmuteAudio() {
+    if (!audioBackup) return;
+    for (var k in audioBackup) {
+      if (Object.prototype.hasOwnProperty.call(audioBackup, k)) {
+        MG.Audio[k] = audioBackup[k];
+      }
+    }
+    audioBackup = null;
+  }
+
+  /** 音频页专用：绕过面板静音，调用"进面板前"的真实方法 */
+  function playAudioRaw(name) {
+    var mute = audioMuteReason();
+    if (mute) {
+      setStatus('err', '不会出声：' + mute + '。请到「设置」里打开音效 / 调高音量');
+      return;
+    }
+    var fn = null;
+    if (audioBackup && audioBackup[name]) fn = audioBackup[name];
+    else if (MG.Audio && typeof MG.Audio[name] === 'function') fn = MG.Audio[name];
+    if (typeof fn !== 'function') {
+      setStatus('err', 'MG.Audio.' + name + ' 不存在');
+      return;
+    }
+    try {
+      fn();
+      setStatus('ok', '已播放 MG.Audio.' + name + '()');
+    } catch (e) {
+      setStatus('err', '播放 ' + name + ' 抛错：' + (e && e.message ? e.message : e));
+    }
+  }
+
+  /* ------------------------------------------------------------
+   * 日志捕获（只记录，不拦截原输出）
+   * ---------------------------------------------------------- */
+  function fmtArg(a) {
+    if (a === null || a === undefined) return String(a);
+    if (typeof a === 'string') return a;
+    if (typeof a === 'number' || typeof a === 'boolean') return String(a);
+    try { return JSON.stringify(a); } catch (e) { return String(a); }
+  }
+
+  function pushLog(level, text) {
+    var d = new Date();
+    logs.push({
+      id: ++logSeq,
+      t: pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds()),
+      level: level,
+      text: text
+    });
+    while (logs.length > LOG_MAX) logs.shift();
+    if (activeTab === 'logs' && panelOpen) renderBody();
+  }
+
+  function hookConsole() {
+    if (consoleHooked || !global.console) return;
+    consoleHooked = true;
+    var wrap = function (level) {
+      var orig = global.console[level];
+      if (typeof orig !== 'function') return;
+      global.console[level] = function () {
+        var parts = [];
+        for (var i = 0; i < arguments.length; i++) parts.push(fmtArg(arguments[i]));
+        try { pushLog(level, parts.join(' ')); } catch (e) { /* 忽略 */ }
+        return orig.apply(global.console, arguments);
+      };
+    };
+    wrap('warn');
+    wrap('error');
+    if (typeof global.addEventListener !== 'function') return;
+    global.addEventListener('error', function (e) {
+      var msg = (e && e.message) ? e.message : 'unknown';
+      var where = (e && e.filename) ? (' @ ' + e.filename + ':' + e.lineno) : '';
+      pushLog('error', 'onerror: ' + msg + where);
+    });
+  }
+
+  /* ------------------------------------------------------------
+   * FPS 采样（独立 rAF，不影响主循环）
+   * ---------------------------------------------------------- */
+  function startFps() {
+    if (fps.running || !global.requestAnimationFrame) return;
+    fps.running = true;
+    fps.frames = 0;
+    fps.value = 0;
+    fps.last = Date.now();
+    var tick = function () {
+      if (!fps.running) return;
+      fps.frames++;
+      var now = Date.now();
+      if (now - fps.last >= 500) {
+        fps.value = Math.round(fps.frames * 1000 / (now - fps.last));
+        fps.frames = 0;
+        fps.last = now;
+        var out = $('dev-fps');
+        if (out) out.textContent = String(fps.value);
+      }
+      fps.raf = global.requestAnimationFrame(tick);
+    };
+    fps.raf = global.requestAnimationFrame(tick);
+  }
+
+  function stopFps() {
+    fps.running = false;
+    if (fps.raf && global.cancelAnimationFrame) global.cancelAnimationFrame(fps.raf);
+    fps.raf = 0;
+  }
+
+  /* ------------------------------------------------------------
+   * 面板开关
+   * ---------------------------------------------------------- */
+  function unlockAndOpen() {
+    unlocked = true;
+    open();
+  }
+
+  function open() {
+    if (!unlocked) { setStatus('err', '未通过验证'); return; }
+    if (!els['dev-screen']) return;
+    panelOpen = true;
+    if (MG.UI && MG.UI.hideAllScreens) MG.UI.hideAllScreens();
+    if (MG.UI && MG.UI.show) MG.UI.show('dev-screen');
+    try {
+      renderTabs();
+      renderBody();
+      if (activeTab === 'env') startFps();
+      // 静音放在"面板已显示且渲染成功"之后：渲染一旦抛错，玩家不会落到
+      // "面板没出来、声音却没了"的处境（只能刷新页面才能恢复）
+      muteAudio();
+    } catch (e) {
+      console.error('[dev] 面板渲染失败', e);
+      unmuteAudio();                       // 兜底：任何异常都立刻还原音频
+      setStatus('err', '面板渲染出错，声音已还原');
+    }
+  }
+
+  /**
+   * 关闭面板
+   * @param {boolean} [silent] 静默关闭：不回到主菜单（供"跳到别的面板 / 直接开局"使用，
+   *                           避免中间闪一下主菜单）
+   */
+  function close(silent) {
+    panelOpen = false;
+    stopFps();
+    // 状态条定时器要清：否则关闭面板后 4 秒内仍有一次回调去改已隐藏的 dev-status
+    if (statusTimer) { clearTimeout(statusTimer); statusTimer = null; }
+    unmuteAudio();
+    restoreLegacy(false);
+    // 显式隐藏：即使 hideAllScreens 的名单将来又被漏改，面板本身也一定关得掉（双保险）
+    if (MG.UI && MG.UI.hide) MG.UI.hide('dev-screen');
+    var node = $('dev-screen');
+    if (node && node.classList) node.classList.add('hidden');
+    if (silent) return;
+    if (MG.UI && MG.UI.showMainMenu) MG.UI.showMainMenu();
+  }
+
+  function isOpen() { return panelOpen; }
+  function isUnlocked() { return unlocked; }
+
+  /* ------------------------------------------------------------
+   * 页签
+   * ---------------------------------------------------------- */
+  var TABS = [
+    { id: 'icons', label: '图标', render: renderIcons },
+    { id: 'audio', label: '音频', render: renderAudio },
+    { id: 'visual', label: '视觉', render: renderVisual },
+    { id: 'game', label: '玩法', render: renderGame },
+    { id: 'data', label: '数据', render: renderData },
+    { id: 'env', label: '环境', render: renderEnv },
+    { id: 'logs', label: '日志', render: renderLogs }
+  ];
+
+  function renderTabs() {
+    var box = els['dev-tabs'];
+    if (!box) return;
+    var html = '';
+    for (var i = 0; i < TABS.length; i++) {
+      var t = TABS[i];
+      html += '<button class="dev-tab' + (t.id === activeTab ? ' is-active' : '') + '"' +
+        ' data-act="tab" data-arg="' + t.id + '">' + esc(t.label) + '</button>';
+    }
+    box.innerHTML = html;
+  }
+
+  /** 重绘时需要保留现场的表单元素（renderBody 会重建 innerHTML，值会丢） */
+  var PRESERVE_IDS = ['dev-seed', 'dev-io', 'dev-icon-pick', 'dev-icon-count', 'dev-diff'];
+  var rendering = false;
+
+  function snapshotInputs() {
+    var snap = {};
+    for (var i = 0; i < PRESERVE_IDS.length; i++) {
+      var n = $(PRESERVE_IDS[i]);
+      if (n && typeof n.value === 'string') snap[PRESERVE_IDS[i]] = n.value;
+    }
+    return snap;
+  }
+
+  function restoreInputs(snap) {
+    for (var id in snap) {
+      if (!Object.prototype.hasOwnProperty.call(snap, id)) continue;
+      var n = $(id);
+      if (n && snap[id] !== '') n.value = snap[id];
+    }
+  }
+
+  function renderBody() {
+    var box = els['dev-body'];
+    if (!box) return;
+    // 防重入：renderBody 期间若有代码触发 console.warn/error，pushLog 会再次调到这里
+    if (rendering) return;
+    var snap = snapshotInputs();
+    rendering = true;
+    try {
+      if (activeTab === 'env') startFps(); else stopFps();
+      var done = false;
+      for (var i = 0; i < TABS.length; i++) {
+        if (TABS[i].id === activeTab) { TABS[i].render(box); done = true; break; }
+      }
+      if (!done) box.innerHTML = '';
+    } finally {
+      rendering = false;
+    }
+    restoreInputs(snap);
+  }
+
+  function card(title, note, inner) {
+    return '<div class="dev-card">' +
+      '<div class="dev-card-head"><b>' + esc(title) + '</b>' +
+      (note ? '<span>' + note + '</span>' : '') + '</div>' +
+      inner + '</div>';
+  }
+
+  function btn(label, act, arg, cls) {
+    return '<button class="dev-btn' + (cls ? ' ' + cls : '') + '" data-act="' + act + '"' +
+      (arg !== undefined && arg !== null ? ' data-arg="' + esc(arg) + '"' : '') + '>' + label + '</button>';
+  }
+
+  /* ------------------------------------------------------------
+   * ① 图标
+   * ---------------------------------------------------------- */
+  function iconKeys() {
+    var keys = [];
+    if (MG.Icons && MG.Icons.svg) {
+      for (var k in MG.Icons.svg) {
+        if (Object.prototype.hasOwnProperty.call(MG.Icons.svg, k)) keys.push(k);
+      }
+    }
+    return keys;
+  }
+
+  function renderIcons(box) {
+    var keys = iconKeys();
+    var grid = '';
+    for (var i = 0; i < keys.length; i++) {
+      var k = keys[i];
+      grid += '<button class="dev-icon-cell" data-act="copy-icon" data-arg="' + k + '">' +
+        '<span class="dev-icon-box">' + icon(k) + '</span>' +
+        '<span class="dev-icon-key">' + k + '</span>' +
+        '<span class="dev-icon-use">' + esc(ICON_LABELS[k] || '') + '</span>' +
+        '</button>';
+    }
+
+    var opts = '';
+    for (var j = 0; j < keys.length; j++) {
+      opts += '<option value="' + keys[j] + '">' + keys[j] + '</option>';
+    }
+
+    var html = '';
+    html += card('图标总览', keys.length + ' 个 · 点一下复制 iconHtml 代码',
+      '<div class="dev-icon-grid">' + grid + '</div>');
+
+    html += card('多实例隔离测试', '同一图标多次出现时，内部 id / 渐变引用不能串味',
+      '<div class="dev-row">' +
+        '<label>图标</label><select class="dev-select" id="dev-icon-pick">' + opts + '</select>' +
+        '<label>份数</label><select class="dev-select" id="dev-icon-count">' +
+          '<option>2</option><option>4</option><option>8</option>' +
+        '</select>' +
+        btn('生成', 'gen-icons') +
+      '</div>' +
+      '<div id="dev-icon-out" class="dev-icon-strip"></div>');
+
+    html += card('尺寸与基线 / 缺失兜底', '检查 1em / 2em / 3em 与中文混排；不存在的 key 必须返回空串',
+      '<div class="dev-row dev-baseline">' +
+        '<span class="dev-em1">' + icon('trophy') + ' 1em 对齐</span>' +
+        '<span class="dev-em2">' + icon('alarm') + ' 2em</span>' +
+        '<span class="dev-em3">' + icon('shield') + ' 3em</span>' +
+      '</div>' +
+      '<div class="dev-row">' + btn('测试不存在的 key', 'test-missing') +
+        '<span id="dev-missing-out" class="dev-mono"></span></div>');
+
+    box.innerHTML = html;
+  }
+
+  /* ------------------------------------------------------------
+   * ② 音频
+   * ---------------------------------------------------------- */
+  /** 设置层面的静音原因（返回空串表示正常） */
+  function audioMuteReason() {
+    if (!MG.Settings) return '';
+    var s = MG.Settings.get();
+    if (s.sfx === false) return '设置里「音效」是关闭的';
+    if (typeof s.volume === 'number' && s.volume <= 0) return '设置里「音量」是 0';
+    return '';
+  }
+
+  function renderAudio(box) {
+    var sfxBtns = '';
+    for (var i = 0; i < AUDIO_SFX.length; i++) {
+      var n = AUDIO_SFX[i];
+      var tag = AUDIO_THROTTLED[n] ? '<span class="dev-tag">' + esc(AUDIO_THROTTLED[n]) + '</span>' : '';
+      sfxBtns += '<button class="dev-btn" data-act="play-audio" data-arg="' + n + '">' +
+        'MG.Audio.' + n + '()' + tag + '</button>';
+    }
+    var utilBtns = '';
+    for (var j = 0; j < AUDIO_UTIL.length; j++) {
+      utilBtns += '<button class="dev-btn" data-act="play-audio" data-arg="' + AUDIO_UTIL[j] + '">' +
+        'MG.Audio.' + AUDIO_UTIL[j] + '()</button>';
+    }
+
+    var mute = audioMuteReason();
+    var warn = mute
+      ? '<div class="dev-warn">当前不会出声：' + esc(mute) + '（到「设置」里打开音效 / 调高音量）</div>'
+      : '';
+
+    var html = '';
+    html += card('音效试听', '面板内其它操作全部静音，只有这里的按钮会发声',
+      warn +
+      '<div class="dev-btn-grid">' + sfxBtns + '</div>' +
+      '<div class="dev-row">' + btn('连播 5 次 click', 'play-audio-5') + '</div>');
+
+    html += card('工具方法（本身不发声）', '只做上下文/增益操作，点了不会有声音是正常的',
+      '<div class="dev-btn-grid">' + utilBtns + '</div>' +
+      '<p class="dev-hint">unlock() 负责用用户手势唤醒 AudioContext；syncVolume() 只把总增益同步到当前设置。</p>');
+
+    html += card('当前音频状态', '面板静音只发生在面板打开期间，退出即恢复；不写设置',
+      '<div class="dev-kv">' +
+        kv('sfx 设置', (MG.Settings && MG.Settings.get().sfx) ? '开' : '关') +
+        kv('volume 设置', String(MG.Settings ? MG.Settings.get().volume : '-')) +
+        kv('AudioContext', (MG.Audio && typeof MG.Audio.unlock === 'function')
+          ? (audioBackup ? '面板内已静音（方法被包装）' : '正常') : '未加载') +
+      '</div>');
+    box.innerHTML = html;
+  }
+
+  /* ------------------------------------------------------------
+   * ③ 视觉
+   * ---------------------------------------------------------- */
+  function themeRow() {
+    var cur = MG.Settings ? MG.Settings.get().theme : 'tech';
+    var themes = [['tech', '科技'], ['dungeon', '地牢'], ['forest', '森林']];
+    var out = '<div class="dev-row"><label>主题</label>';
+    for (var i = 0; i < themes.length; i++) {
+      out += '<button class="dev-btn' + (cur === themes[i][0] ? ' is-active' : '') + '"' +
+        ' data-act="set-setting" data-arg="theme:' + themes[i][0] + '">' + themes[i][1] + '</button>';
+    }
+    out += '</div>';
+    return out;
+  }
+
+  function renderVisual(box) {
+    var s = MG.Settings ? MG.Settings.get() : {};
+    var q = s.quality || 'mid';
+    var html = '';
+    html += card('主题 / 色盲', '切换后立即应用到 3D 场景与 UI',
+      themeRow() +
+      '<div class="dev-row"><label>色盲友好</label>' +
+        btn(s.colorblind ? '开' : '关', 'toggle-setting', 'colorblind') + '</div>');
+
+    html += card('画质 / 特效', '',
+      '<div class="dev-row"><label>画质</label>' +
+        [['low', '低'], ['mid', '中'], ['high', '高']].map(function (it) {
+          return '<button class="dev-btn' + (q === it[0] ? ' is-active' : '') + '"' +
+            ' data-act="set-setting" data-arg="quality:' + it[0] + '">' + it[1] + '</button>';
+        }).join('') +
+      '</div>' +
+      '<div class="dev-row"><label>阴影</label>' + btn(s.shadows ? '开' : '关', 'toggle-setting', 'shadows') +
+        '<label>雾</label>' + btn(s.fog ? '开' : '关', 'toggle-setting', 'fog') + '</div>');
+
+    html += card('视角 / 手感', '',
+      '<div class="dev-row"><label>FOV</label>' +
+        '<input class="dev-range" type="range" id="dev-fov" min="60" max="110" step="1" value="' + (s.fov || 75) + '" />' +
+        '<span class="dev-mono" id="dev-fov-val">' + (s.fov || 75) + '</span></div>' +
+      '<div class="dev-row"><label>移速</label>' +
+        '<input class="dev-range" type="range" id="dev-speed" min="0.5" max="2" step="0.1" value="' + (s.moveSpeed || 1) + '" />' +
+        '<span class="dev-mono" id="dev-speed-val">' + (s.moveSpeed || 1) + '</span></div>');
+
+    var cls = document.body.className || '';
+    var legacyRow = '';
+    for (var i = 0; i < LEGACY_CLASSES.length; i++) {
+      var c = LEGACY_CLASSES[i];
+      var on = cls.indexOf(c) >= 0;
+      legacyRow += '<button class="dev-btn' + (on ? ' is-active' : '') + '" data-act="toggle-legacy" data-arg="' + c + '">' +
+        c + '：' + (on ? '开' : '关') + '</button>';
+    }
+    html += card('老内核模拟', '手动挂/摘 body 上的 legacy-* class，用来验降级样式',
+      '<div class="dev-btn-grid">' + legacyRow + '</div>' +
+      '<div class="dev-row">' + btn('全部关闭', 'clear-legacy') +
+        '<span class="dev-hint">离开面板时也会自动还原</span></div>');
+
+    box.innerHTML = html;
+  }
+
+  /* ------------------------------------------------------------
+   * ④ 玩法（含沙盒入口）
+   * ---------------------------------------------------------- */
+  function renderGame(box) {
+    var diffs = MG.Maze ? MG.Maze.DIFFICULTIES : {};
+    var diffOpts = '';
+    for (var k in diffs) {
+      if (!Object.prototype.hasOwnProperty.call(diffs, k)) continue;
+      diffOpts += '<option value="' + k + '">' + esc(diffs[k].name) + '</option>';
+    }
+    var todaySeed = (MG.Maze && MG.Maze.dailySeed) ? MG.Maze.dailySeed().slice(6) : '';
+    var wallet = MG.Shop ? MG.Shop.getWallet() : { coins: 0 };
+
+    var html = '';
+    html += card('开局参数', '沙盒固定用 15×15 全开放场地（无墙 / 无金币 / 无天花板）',
+      '<div class="dev-row"><label>难度</label><select class="dev-select" id="dev-diff">' + diffOpts + '</select></div>' +
+      '<div class="dev-row"><label>种子</label>' +
+        '<input class="dev-input" id="dev-seed" type="text" maxlength="24" placeholder="留空=随机" />' +
+        btn('用今日种子', 'fill-today-seed') +
+        '<span class="dev-mono">' + esc(todaySeed) + '</span></div>' +
+      '<div class="dev-row">' + btn('开始游戏（正常）', 'start-normal') +
+        btn('进入空关卡（沙盒）', 'start-sandbox', null, 'is-primary') + '</div>' +
+      '<div class="dev-row"><label>沙盒自动解锁小地图</label>' +
+        btn(sandboxAutoMap ? '开' : '关', 'toggle-sandbox-map') + '</div>');
+
+    html += card('钱包 / 道具', '与商店、签到共用同一份钱包',
+      '<div class="dev-kv">' +
+        kv('金币余额', String(wallet.coins)) +
+        kv('小地图解锁', String(MG.Shop ? MG.Shop.countOf('mapUnlock') : 0)) +
+        kv('最佳路径', String(MG.Shop ? MG.Shop.countOf('bestPath') : 0)) +
+        kv('最快路径', String(MG.Shop ? MG.Shop.countOf('fastPath') : 0)) +
+        kv('签到护符', String(MG.Shop ? MG.Shop.countOf('streakShield') : 0)) +
+      '</div>' +
+      '<div class="dev-row">' + btn('金币 +1000', 'coins-add') +
+        btn('金币归零', 'coins-zero', null, 'is-danger') +
+        btn('各道具 +10', 'items-add') +
+        btn('道具清零', 'items-zero', null, 'is-danger') + '</div>');
+
+    box.innerHTML = html;
+  }
+
+  /* ------------------------------------------------------------
+   * ⑤ 数据 / 存档 / 签到快进
+   * ---------------------------------------------------------- */
+  function readCheckin() {
+    var raw = safeGet(CHECKIN_KEY);
+    if (!raw) return null;
+    try { return JSON.parse(raw); } catch (e) { return null; }
+  }
+
+  function renderData(box) {
+    var keys = storageKeys();
+    var rows = '';
+    for (var i = 0; i < keys.length; i++) {
+      var k = keys[i];
+      var val = safeGet(k) || '';
+      rows += '<details class="dev-details">' +
+        '<summary><span class="dev-key">' + esc(k) + '</span>' +
+        '<span class="dev-size">' + sizeOf(val) + ' 字符</span></summary>' +
+        '<pre class="dev-pre">' + esc(val.length > 4000 ? val.slice(0, 4000) + ' …（已截断）' : val) + '</pre>' +
+        '<div class="dev-row">' + btn('删除此项', 'del-key', k, 'is-danger') + '</div>' +
+        '</details>';
+    }
+    if (!rows) rows = '<p class="dev-hint">localStorage 不可用或为空</p>';
+
+    var ck = readCheckin();
+    var ckInfo = ck
+      ? kv('lastDay', esc(String(ck.lastDay || '（空）'))) +
+        kv('streak', String(ck.streak || 0)) +
+        kv('累计天数', String(ck.totalDays || 0)) +
+        kv('最长连签', String(ck.maxStreak || 0)) +
+        kv('护符', String(MG.Shop ? MG.Shop.countOf('streakShield') : 0))
+      : '<p class="dev-hint">还没有签到存档，先去签到一次</p>';
+
+    var html = '';
+    html += card('签到快进', '把上次签到日往前挪 N 天 → 回主菜单点签到即可验证护符/断签',
+      '<div class="dev-kv">' + ckInfo + '</div>' +
+      '<div class="dev-btn-grid">' +
+        btn('快进 1 天', 'ck-rewind', '1') +
+        btn('快进 3 天', 'ck-rewind', '3') +
+        btn('快进 5 天', 'ck-rewind', '5') +
+        btn('快进 6 天', 'ck-rewind', '6') +
+        btn('快进 7 天', 'ck-rewind', '7') +
+      '</div>' +
+      '<div class="dev-row">' + btn('护符 +1', 'shield-add') +
+        btn('重置签到存档（回到从未签到）', 'ck-reset', null, 'is-danger') +
+        btn('打开签到面板', 'open-checkin') + '</div>' +
+      '<p class="dev-hint">提示：漏签 1~5 天护符生效；漏签 ≥6 天（快进 7 天）则连签清零且护符不消耗。</p>');
+
+    html += card('存档一览', keys.length + ' 个 key · 点开看内容',
+      rows +
+      '<div class="dev-row">' + btn('清空全部 maze3d.* 存档', 'wipe-all', null, 'is-danger') + '</div>');
+
+    html += card('导出 / 导入', '导入会覆盖同名 key',
+      '<textarea class="dev-textarea" id="dev-io" placeholder="点「导出」把全部存档写到这里；或粘贴 JSON 后点「导入」"></textarea>' +
+      '<div class="dev-row">' + btn('导出到文本框', 'export-all') +
+        btn('从文本框导入', 'import-all', null, 'is-danger') + '</div>');
+
+    box.innerHTML = html;
+  }
+
+  /* ------------------------------------------------------------
+   * ⑥ 环境
+   * ---------------------------------------------------------- */
+  function mm(query) {
+    try {
+      if (!global.matchMedia) return '-';
+      return global.matchMedia(query).matches ? '命中' : '不命中';
+    } catch (e) { return '不支持'; }
+  }
+
+  function bodyClasses() {
+    return trim(document.body.className || '') || '（无）';
+  }
+
+  function envReport() {
+    var lines = [];
+    lines.push('UA: ' + (global.navigator ? global.navigator.userAgent : '-'));
+    lines.push('视口: ' + global.innerWidth + ' x ' + global.innerHeight);
+    lines.push('DPR: ' + (global.devicePixelRatio || 1));
+    lines.push('orientation:landscape = ' + mm('(orientation: landscape)'));
+    lines.push('hover:none = ' + mm('(hover: none)'));
+    lines.push('pointer:coarse = ' + mm('(pointer: coarse)'));
+    lines.push('max-height:640px = ' + mm('(max-height: 640px)'));
+    lines.push('body class: ' + bodyClasses());
+    lines.push('Three.js: ' + (global.THREE ? global.THREE.REVISION : '-'));
+    lines.push('FPS: ' + fps.value);
+    if (global.performance && global.performance.memory) {
+      lines.push('JS 堆: ' + Math.round(global.performance.memory.usedJSHeapSize / 1048576) + ' MB');
+    }
+    return lines.join('\n');
+  }
+
+  function renderEnv(box) {
+    var jump = '';
+    var jumps = [
+      ['主菜单', 'goto:menu'], ['商店', 'goto:shop'], ['成就', 'goto:ach'],
+      ['排行榜', 'goto:rank'], ['签到', 'goto:checkin'], ['设置', 'goto:settings']
+    ];
+    for (var i = 0; i < jumps.length; i++) {
+      var split = jumps[i][1].split(':');
+      jump += btn(jumps[i][0], 'goto', split[1]);
+    }
+
+    var html = '';
+    html += card('环境信息', '实时采样（FPS 每 0.5 秒刷新）',
+      '<div class="dev-kv">' +
+        kv('视口', global.innerWidth + ' x ' + global.innerHeight) +
+        kv('DPR', String(global.devicePixelRatio || 1)) +
+        kv('横屏媒体查询', mm('(orientation: landscape)')) +
+        kv('hover: none', mm('(hover: none)')) +
+        kv('pointer: coarse', mm('(pointer: coarse)')) +
+        kv('高 ≤ 640', mm('(max-height: 640px)')) +
+        kv('body class', esc(bodyClasses())) +
+        kv('Three.js', String(global.THREE ? global.THREE.REVISION : '-')) +
+        kv('FPS', '<span id="dev-fps">0</span>') +
+      '</div>' +
+      '<details class="dev-details"><summary>User-Agent</summary>' +
+        '<pre class="dev-pre">' + esc(global.navigator ? global.navigator.userAgent : '-') + '</pre></details>' +
+      '<div class="dev-row">' + btn('复制环境报告', 'copy-env') + '</div>');
+
+    html += card('快速跳转', '会先退出面板再打开目标界面',
+      '<div class="dev-btn-grid">' + jump + '</div>');
+
+    box.innerHTML = html;
+  }
+
+  /* ------------------------------------------------------------
+   * ⑦ 日志
+   * ---------------------------------------------------------- */
+  function renderLogs(box) {
+    var body = '';
+    if (!logs.length) {
+      body = '<p class="dev-hint">暂无日志。触发一次 warn / error 后会出现在这里。</p>';
+    } else {
+      for (var i = logs.length - 1; i >= 0; i--) {
+        var it = logs[i];
+        body += '<div class="dev-log-item is-' + it.level + '">' +
+          '<span class="dev-log-t">' + it.t + '</span>' +
+          '<span class="dev-log-lv">' + it.level + '</span>' +
+          '<span class="dev-log-tx">' + esc(it.text) + '</span>' +
+          '</div>';
+      }
+    }
+    var html = card('日志（最近 ' + LOG_MAX + ' 条）', 'warn / error / window.onerror',
+      '<div class="dev-log-list">' + body + '</div>' +
+      '<div class="dev-row">' + btn('复制全部', 'copy-logs') +
+        btn('清空', 'clear-logs', null, 'is-danger') + '</div>');
+    box.innerHTML = html;
+  }
+
+  function kv(k, v) {
+    return '<div class="dev-kv-row"><span class="dev-kv-k">' + esc(k) + '</span>' +
+      '<span class="dev-kv-v">' + v + '</span></div>';
+  }
+
+  /* ------------------------------------------------------------
+   * 沙盒
+   * ---------------------------------------------------------- */
+  function takeSandboxFlag() {
+    var v = sandboxPending;
+    sandboxPending = false;
+    return v;
+  }
+
+  /** 沙盒场地的单元格数：7 单元格 → 15×15 网格（约 30×30 米），与游戏里描述难度的口径一致 */
+  var SANDBOX_CELLS = 7;
+
+  /** 由 main.js 的 buildLevel 调用：给沙盒准备一份"无墙、无金币、无天花板"的难度副本 */
+  function patchDiff(diff) {
+    var copy = {};
+    for (var k in diff) {
+      if (Object.prototype.hasOwnProperty.call(diff, k)) copy[k] = diff[k];
+    }
+    copy.cells = SANDBOX_CELLS;   // 15×15 网格
+    copy.coins = 0;               // 不放金币（需要时用道具面板生成）
+    copy.ceiling = false;         // 没有天花板
+    copy.farCell = false;
+    copy.wallHeight = 3;          // 无墙，仅用于内部参数占位
+    copy.name = '沙盒';            // HUD / 胜利结算都读难度名，沿用原难度名会显示成"困难"（BUG-025）
+    // 空地一览无余，雾按"能看清整个场地"给（沿用困难档 0.0252 会糊成一片）
+    copy.fogDensity = 0.006;
+    return copy;
+  }
+
+  /** 由 main.js 的 buildLevel 调用：把整张网格打通，形成"只有地面"的空场 */
+  function prepareMaze(maze) {
+    if (!maze || !maze.grid) return;
+    for (var i = 0; i < maze.grid.length; i++) maze.grid[i] = 0;
+    maze.start = { x: 1, y: 1 };
+    maze.end = { x: maze.size - 2, y: maze.size - 2 };
+  }
+
+  /** 由 main.js 在 MazeView / Player 构建完成后调用 */
+  function afterBuild() {
+    if (!MG.Game || !MG.Game.mazeView) return;
+    var view = MG.Game.mazeView;
+    if (view.portal) view.portal.visible = false;
+    if (view.startOrb) view.startOrb.visible = false;
+    if (view.endLight) view.endLight.visible = false;
+    if (view.particles) view.particles.visible = false;
+    if (view.walls) view.walls.visible = false;
+    if (view.mapItem && view.mapItem.group) {
+      view.mapItem.group.visible = false;
+      // 光隐藏不够：tryCollectMap 只判 collected、不判 visible，玩家路过卷轴真实坐标
+      // 会"隔空"捡到地图（沙盒语义被破坏）。标记 collected 后由 spawnMapItem 再复位。
+      view.mapItem.collected = true;
+    }
+    var i;
+    for (i = 0; i < view.coins.length; i++) {
+      view.coins[i].mesh.visible = false;
+      // 同理：金币也只判 collected，一起标记，避免"看不见却能捡"
+      view.coins[i].collected = true;
+    }
+    if (sandboxAutoMap) {
+      MG.Game.mapFound = true;
+      if (MG.UI && MG.UI.updateMinimapLock) MG.UI.updateMinimapLock(false, '');
+    }
+    setStatus('ok', '已进入空关卡：' + view.maze.size + '×' + view.maze.size + ' 全开放，无墙无物');
+  }
+
+  /** 玩家前方 dist 米处的世界坐标 */
+  function pointAhead(dist) {
+    var p = MG.Game && MG.Game.player;
+    if (!p) return null;
+    var fx = -Math.sin(p.yaw || 0);
+    var fz = -Math.cos(p.yaw || 0);
+    return { x: p.pos.x + fx * dist, z: p.pos.z + fz * dist };
+  }
+
+  function worldToCell(worldX, worldZ, maze) {
+    // 不要硬编码 2.0：格子尺寸是 maze.js 的常量，这里复制一份会在将来改尺寸时静默错位
+    var cell = (MG.Maze && MG.Maze.CELL) || 2.0;
+    var half = (maze.size * cell) / 2;
+    return {
+      x: Math.round((worldX + half - cell / 2) / cell),
+      y: Math.round((worldZ + half - cell / 2) / cell)
+    };
+  }
+
+  /** 生成一枚金币（沙盒道具面板用） */
+  function spawnCoin() {
+    var view = MG.Game && MG.Game.mazeView;
+    var pt = pointAhead(2.5);
+    if (!view || !pt || !global.THREE) { setStatus('err', '不在游戏中'); return; }
+    var THREE = global.THREE;
+    var geo = new THREE.TorusGeometry(0.26, 0.09, 8, 20);
+    var mat = new THREE.MeshLambertMaterial({ color: 0xffd24a, emissive: 0x4a3200 });
+    var mesh = new THREE.Mesh(geo, mat);
+    mesh.position.set(pt.x, 1.0, pt.z);
+    mesh.rotation.x = Math.PI / 2;
+    view.group.add(mesh);
+    var gc = worldToCell(pt.x, pt.z, view.maze);
+    view.coins.push({ mesh: mesh, x: gc.x, y: gc.y, world: { x: pt.x, z: pt.z }, collected: false });
+    view.totalCoins = view.coins.length;
+    setStatus('ok', '已生成 1 枚金币（前方 2.5 米）');
+  }
+
+  /** 生成地图卷轴：复用本局已建好的模型，挪到玩家前方 */
+  function spawnMapItem() {
+    var view = MG.Game && MG.Game.mazeView;
+    var pt = pointAhead(3);
+    if (!view || !view.mapItem || !pt) { setStatus('err', '本局没有地图卷轴模型'); return; }
+    var mi = view.mapItem;
+    mi.collected = false;
+    mi.group.visible = true;
+    mi.group.position.x = pt.x;
+    mi.group.position.z = pt.z;
+    mi.world = { x: pt.x, z: pt.z };
+    var gc = worldToCell(pt.x, pt.z, view.maze);
+    mi.x = gc.x;
+    mi.y = gc.y;
+    if (mi.sprite) mi.sprite.visible = true;
+    setStatus('ok', '已生成地图卷轴（前方 3 米）');
+  }
+
+  /** 供 ui.js 的 renderItemPanel 追加"生成器"行（仅沙盒内） */
+  function getItemPanelRows() {
+    if (!sandboxActive || !MG.Game || !MG.Game.mazeView) return '';
+    return '<li class="item-row">' +
+        '<span class="item-icon">' + icon('map') + '</span>' +
+        '<span class="item-name">生成地图卷轴</span>' +
+        '<span class="item-count">测试</span>' +
+        '<button class="mini-btn item-use-btn" data-use-id="dev:spawnMap">生成</button>' +
+      '</li>' +
+      '<li class="item-row">' +
+        '<span class="item-icon">' + icon('money') + '</span>' +
+        '<span class="item-name">生成金币 ×1</span>' +
+        '<span class="item-count">测试</span>' +
+        '<button class="mini-btn item-use-btn" data-use-id="dev:spawnCoin">生成</button>' +
+      '</li>';
+  }
+
+  /** 供 main.js 的 useItem 处理 dev: 前缀 */
+  function handleItemUse(id) {
+    if (id === 'dev:spawnMap') spawnMapItem();
+    else if (id === 'dev:spawnCoin') spawnCoin();
+    if (MG.UI && MG.UI.renderItemPanel) MG.UI.renderItemPanel();
+  }
+
+  function startSandbox() {
+    if (!MG.UI || !MG.UI.menuCallbacks || !MG.UI.menuCallbacks.onStart) {
+      setStatus('err', '无法开局（menuCallbacks 未就绪）');
+      return;
+    }
+    // 先确认没有在飞的开局：startGame 首句会因 _startPending 提前返回而不消费标记，
+    // 那一局 buildLevel 就会把"别人的局"变成沙盒
+    if (MG.Game && MG.Game._startPending) { setStatus('err', '正在加载中，请稍候再试'); return; }
+    sandboxPending = true;
+    sandboxActive = true;
+    close(true);   // 静默关闭：直接进加载流程，中间不闪主菜单
+    MG.UI.menuCallbacks.onStart('hard', 'dev-sandbox', false);
+  }
+
+  /** 沙盒局结束（回主菜单 / 重新开局）时复位 */
+  function resetSandbox() {
+    sandboxActive = false;
+    // pending 也必须清：若"进入空关卡"后、buildLevel 消费标记前发生异常，
+    // 这个一次性标记会活到下一局正常游戏，把正常局静默变成沙盒
+    sandboxPending = false;
+  }
+
+  /* ------------------------------------------------------------
+   * 签到快进
+   * ---------------------------------------------------------- */
+  function rewindCheckin(days) {
+    var data = readCheckin();
+    if (!data || typeof data !== 'object' || !data.lastDay) {
+      setStatus('err', '还没有签到存档，先去签到一次');
+      return;
+    }
+    var last = String(data.lastDay);
+    if (!/^[0-9]{8}$/.test(last)) {
+      setStatus('err', '存档里的 lastDay 不合法：' + last);
+      return;
+    }
+    var d = new Date(parseInt(last.slice(0, 4), 10), parseInt(last.slice(4, 6), 10) - 1, parseInt(last.slice(6, 8), 10));
+    d.setDate(d.getDate() - days);
+    data.lastDay = ymd(d);
+    if (!safeSet(CHECKIN_KEY, JSON.stringify(data))) {
+      setStatus('err', '写入失败（localStorage 不可用）');
+      return;
+    }
+    if (MG.Checkin) {
+      if (MG.Checkin._resetCache) MG.Checkin._resetCache();
+      if (MG.Checkin.refreshBadge) MG.Checkin.refreshBadge();
+    }
+    setStatus('ok', '已把上次签到日往前挪 ' + days + ' 天 → ' + data.lastDay + '（回主菜单点签到验证）');
+    renderBody();
+  }
+
+  function resetCheckin() {
+    if (!safeDel(CHECKIN_KEY)) { setStatus('err', '删除失败'); return; }
+    if (MG.Checkin) {
+      if (MG.Checkin._resetCache) MG.Checkin._resetCache();
+      if (MG.Checkin.refreshBadge) MG.Checkin.refreshBadge();
+    }
+    setStatus('ok', '签到存档已重置（回到"从未签到"）');
+    renderBody();
+  }
+
+  /* ------------------------------------------------------------
+   * 事件（统一委托，减少绑定数量）
+   * ---------------------------------------------------------- */
+  function onBodyClick(e) {
+    var node = e.target;
+    while (node && node !== els['dev-body']) {
+      if (node.getAttribute && node.getAttribute('data-act')) {
+        doAction(node.getAttribute('data-act'), node.getAttribute('data-arg'));
+        return;
+      }
+      node = node.parentNode;
+    }
+  }
+
+  function doAction(act, arg) {
+    /* --- 页签 --- */
+    if (act === 'tab') {
+      activeTab = arg;
+      renderTabs();
+      renderBody();
+      return;
+    }
+    /* --- 图标 --- */
+    if (act === 'copy-icon') {
+      copyText("MG.UI.iconHtml('" + arg + "')", 'iconHtml(\'' + arg + '\')');
+      return;
+    }
+    if (act === 'gen-icons') {
+      var pick = $('dev-icon-pick');
+      var countSel = $('dev-icon-count');
+      var key = (pick && pick.value) ? pick.value : 'trophy';
+      var n = parseInt(countSel ? countSel.value : '', 10);
+      if (!(n >= 1 && n <= 16)) n = 4;
+      var out = '';
+      for (var i = 0; i < n; i++) out += '<span class="dev-icon-one">' + icon(key) + '</span>';
+      var box = $('dev-icon-out');
+      if (box) box.innerHTML = out;
+      setStatus('ok', '已生成 ' + n + ' 个 ' + key + ' 实例（渐变不应串色）');
+      return;
+    }
+    if (act === 'test-missing') {
+      var miss = (MG.UI && MG.UI.iconHtml) ? MG.UI.iconHtml('no_such_icon_key') : 'NO_UI';
+      var res = $('dev-missing-out');
+      if (res) res.textContent = '返回长度 = ' + String(miss === undefined ? 'undefined(异常)' : miss.length) +
+        '（期望 0，且界面上不出现 undefined 字样）';
+      setStatus('ok', '缺失图标测试完成');
+      return;
+    }
+    /* --- 音频 --- */
+    if (act === 'play-audio') { playAudioRaw(arg); return; }
+    if (act === 'play-audio-5') {
+      for (var j = 0; j < 5; j++) playAudioRaw('click');
+      setStatus('ok', '已连播 5 次 click');
+      return;
+    }
+    /* --- 视觉 --- */
+    if (act === 'set-setting') {
+      var parts = String(arg).split(':');
+      if (MG.Settings) MG.Settings.set(parts[0], parts[1]);
+      renderBody();
+      setStatus('ok', '已设置 ' + parts[0] + ' = ' + parts[1]);
+      return;
+    }
+    if (act === 'toggle-setting') {
+      if (MG.Settings) {
+        var cur = MG.Settings.get()[arg];
+        MG.Settings.set(arg, !cur);
+      }
+      renderBody();
+      setStatus('ok', '已切换 ' + arg);
+      return;
+    }
+    if (act === 'toggle-legacy') {
+      var has = (document.body.className || '').indexOf(arg) >= 0;
+      if (has) document.body.classList.remove(arg);
+      else document.body.classList.add(arg);
+      renderBody();
+      setStatus('ok', arg + ' → ' + (has ? '关' : '开'));
+      return;
+    }
+    if (act === 'clear-legacy') {
+      restoreLegacy(true);
+      renderBody();
+      setStatus('ok', '已移除全部 legacy-* class');
+      return;
+    }
+    /* --- 玩法 --- */
+    if (act === 'fill-today-seed') {
+      var inp = $('dev-seed');
+      if (inp && MG.Maze && MG.Maze.dailySeed) inp.value = MG.Maze.dailySeed().slice(6);
+      setStatus('ok', '已填入每日挑战种子');
+      return;
+    }
+    if (act === 'toggle-sandbox-map') {
+      sandboxAutoMap = !sandboxAutoMap;
+      renderBody();
+      setStatus('ok', '沙盒自动解锁小地图：' + (sandboxAutoMap ? '开' : '关'));
+      return;
+    }
+    if (act === 'start-normal') { startNormal(); return; }
+    if (act === 'start-sandbox') { startSandbox(); return; }
+    if (act === 'coins-add') {
+      if (MG.Shop) MG.Shop.addCoins(1000);
+      renderBody();
+      setStatus('ok', '金币 +1000');
+      return;
+    }
+    if (act === 'coins-zero') {
+      if (MG.Shop) { var w = MG.Shop.getWallet(); w.coins = 0; MG.Shop.saveWallet(); }
+      renderBody();
+      setStatus('ok', '金币已归零');
+      return;
+    }
+    if (act === 'items-add') {
+      if (MG.Shop) {
+        MG.Shop.addItem('mapUnlock', 10);
+        MG.Shop.addItem('bestPath', 10);
+        MG.Shop.addItem('fastPath', 10);
+        MG.Shop.addItem('streakShield', 10);
+      }
+      renderBody();
+      setStatus('ok', '各计数类道具 +10');
+      return;
+    }
+    if (act === 'items-zero') {
+      if (MG.Shop) {
+        var ids = ['mapUnlock', 'bestPath', 'fastPath', 'streakShield'];
+        for (var q = 0; q < ids.length; q++) {
+          var ww = MG.Shop.getWallet();
+          ww[ids[q]] = 0;
+        }
+        MG.Shop.saveWallet();
+      }
+      renderBody();
+      setStatus('ok', '计数类道具已清零');
+      return;
+    }
+    /* --- 数据 --- */
+    if (act === 'ck-rewind') { rewindCheckin(parseInt(arg, 10) || 1); return; }
+    if (act === 'ck-reset') { resetCheckin(); return; }
+    if (act === 'shield-add') {
+      if (MG.Shop) MG.Shop.addItem('streakShield', 1);
+      renderBody();
+      setStatus('ok', '签到护符 +1');
+      return;
+    }
+    if (act === 'open-checkin') {
+      close();
+      if (MG.Checkin && MG.Checkin.openPanel) MG.Checkin.openPanel();
+      return;
+    }
+    if (act === 'del-key') {
+      if (safeDel(arg)) { setStatus('ok', '已删除 ' + arg); renderBody(); }
+      else setStatus('err', '删除失败');
+      return;
+    }
+    if (act === 'wipe-all') {
+      var keys = storageKeys(), n = 0;
+      for (var m = 0; m < keys.length; m++) {
+        if (keys[m].indexOf('maze3d.') === 0 && safeDel(keys[m])) n++;
+      }
+      setStatus('ok', '已清空 ' + n + ' 个存档 key（刷新页面后完全生效）');
+      renderBody();
+      return;
+    }
+    if (act === 'export-all') {
+      var dump = {};
+      var allKeys = storageKeys();
+      for (var x = 0; x < allKeys.length; x++) dump[allKeys[x]] = safeGet(allKeys[x]);
+      var ta = $('dev-io');
+      if (ta) ta.value = JSON.stringify(dump, null, 2);
+      setStatus('ok', '已导出 ' + allKeys.length + ' 个 key 到文本框');
+      return;
+    }
+    if (act === 'import-all') {
+      var src = $('dev-io');
+      if (!src || !trim(src.value)) { setStatus('err', '文本框是空的'); return; }
+      var parsed;
+      try { parsed = JSON.parse(src.value); } catch (e) { setStatus('err', 'JSON 解析失败：' + e.message); return; }
+      var count = 0;
+      for (var kk in parsed) {
+        if (Object.prototype.hasOwnProperty.call(parsed, kk) && typeof parsed[kk] === 'string') {
+          if (safeSet(kk, parsed[kk])) count++;
+        }
+      }
+      if (MG.Checkin && MG.Checkin._resetCache) MG.Checkin._resetCache();
+      if (MG.Checkin && MG.Checkin.refreshBadge) MG.Checkin.refreshBadge();
+      setStatus('ok', '已导入 ' + count + ' 个 key（刷新页面后完全生效）');
+      renderBody();
+      return;
+    }
+    /* --- 环境 --- */
+    if (act === 'copy-env') { copyText(envReport(), '环境报告'); return; }
+    if (act === 'goto') { doGoto(arg); return; }
+    /* --- 日志 --- */
+    if (act === 'copy-logs') {
+      var lines = [];
+      for (var li = 0; li < logs.length; li++) lines.push(logs[li].t + ' [' + logs[li].level + '] ' + logs[li].text);
+      copyText(lines.join('\n'), '日志 ' + logs.length + ' 条');
+      return;
+    }
+    if (act === 'clear-logs') {
+      logs = [];
+      renderBody();
+      setStatus('ok', '日志已清空');
+      return;
+    }
+  }
+
+  function doGoto(target) {
+    close(true);
+    if (target === 'menu' && MG.UI) MG.UI.showMainMenu();
+    else if (target === 'shop' && MG.UI) MG.UI.openShop();
+    else if (target === 'ach' && MG.UI) MG.UI.openAchievements();
+    else if (target === 'rank' && MG.UI) MG.UI.openRanking();
+    else if (target === 'settings' && MG.UI) MG.UI.showSettings();
+    else if (target === 'checkin' && MG.Checkin) MG.Checkin.openPanel();
+  }
+
+  function startNormal() {
+    if (!MG.UI || !MG.UI.menuCallbacks || !MG.UI.menuCallbacks.onStart) {
+      setStatus('err', '无法开局');
+      return;
+    }
+    var diffSel = $('dev-diff');
+    var seedInp = $('dev-seed');
+    var diff = diffSel ? diffSel.value : 'simple';
+    var seed = seedInp ? trim(seedInp.value) : '';
+    sandboxPending = false;
+    sandboxActive = false;
+    close(true);
+    MG.UI.menuCallbacks.onStart(diff, seed, false);
+  }
+
+  /** 还原 body 上的 legacy-* class（离开面板时自动调用） */
+  function restoreLegacy(force) {
+    for (var i = 0; i < LEGACY_CLASSES.length; i++) {
+      // 只移除"本面板挂上去的"：面板打开时记录了初始状态，这里按初始状态恢复
+      var cls = LEGACY_CLASSES[i];
+      var wasOn = legacyInitial[cls] === true;
+      var isOn = (document.body.className || '').indexOf(cls) >= 0;
+      if (force) {
+        if (isOn && !wasOn) document.body.classList.remove(cls);
+      } else if (isOn !== wasOn) {
+        if (wasOn) document.body.classList.add(cls);
+        else document.body.classList.remove(cls);
+      }
+    }
+  }
+
+  var legacyInitial = {};
+
+  function captureLegacy() {
+    var cls = document.body.className || '';
+    for (var i = 0; i < LEGACY_CLASSES.length; i++) {
+      legacyInitial[LEGACY_CLASSES[i]] = cls.indexOf(LEGACY_CLASSES[i]) >= 0;
+    }
+  }
+
+  /* ------------------------------------------------------------
+   * 滑块（滑块用 input 事件，不能走 click 委托）
+   * ---------------------------------------------------------- */
+  function onBodyInput(e) {
+    var node = e.target;
+    if (!node || !node.id) return;
+    if (node.id === 'dev-fov') {
+      var v = parseInt(node.value, 10) || 75;
+      if (MG.Settings) MG.Settings.set('fov', v);
+      var out1 = $('dev-fov-val');
+      if (out1) out1.textContent = String(v);
+      return;
+    }
+    if (node.id === 'dev-speed') {
+      var sp = parseFloat(node.value) || 1;
+      if (MG.Settings) MG.Settings.set('moveSpeed', sp);
+      var out2 = $('dev-speed-val');
+      if (out2) out2.textContent = String(sp);
+      return;
+    }
+  }
+
+  /* ------------------------------------------------------------
+   * 初始化
+   * ---------------------------------------------------------- */
+  var IDS = [
+    'dev-screen', 'dev-tabs', 'dev-body', 'dev-status', 'btn-dev-close', 'btn-dev-sound',
+    'btn-dev-info'
+  ];
+
+  function cacheEls() {
+    for (var i = 0; i < IDS.length; i++) els[IDS[i]] = $(IDS[i]);
+  }
+
+  function init() {
+    cacheEls();
+    if (!els['dev-screen']) {
+      console.warn('[dev] 未找到开发者面板 DOM，已跳过初始化');
+      return false;
+    }
+    hookConsole();
+    captureLegacy();   // 记录开机时的 legacy-* 状态，退出面板时按它还原
+    if (els['dev-body']) {
+      els['dev-body'].addEventListener('click', onBodyClick);
+      els['dev-body'].addEventListener('input', onBodyInput);
+    }
+    if (els['dev-tabs']) els['dev-tabs'].addEventListener('click', onBodyClick);
+    if (els['btn-dev-close']) {
+      els['btn-dev-close'].addEventListener('click', function () { close(); });
+    }
+    if (els['btn-dev-sound']) {
+      els['btn-dev-sound'].addEventListener('click', function () {
+        if (audioBackup) {
+          unmuteAudio();
+          setStatus('ok', '面板内声音已恢复；再点一次可重新静音');
+        } else {
+          muteAudio();
+          setStatus('ok', '面板内声音已重新静音（仅音频页试听按钮会发声）');
+        }
+      });
+    }
+    if (els['btn-dev-info']) {
+      els['btn-dev-info'].addEventListener('click', function () {
+        copyText(envReport(), '环境报告');
+      });
+    }
+    return true;
+  }
+
+  /* ------------------------------------------------------------
+   * 导出
+   * ---------------------------------------------------------- */
+  MG.Dev = {
+    init: init,
+    open: open,
+    close: close,
+    unlockAndOpen: unlockAndOpen,
+    isOpen: isOpen,
+    isUnlocked: isUnlocked,
+    /** main.js：取出并清掉"下一次开局进沙盒"的标记 */
+    takeSandboxFlag: takeSandboxFlag,
+    /** main.js：沙盒的难度副本 */
+    patchDiff: patchDiff,
+    /** main.js：把网格打通 */
+    prepareMaze: prepareMaze,
+    /** main.js：场景构建完成后的沙盒收尾 */
+    afterBuild: afterBuild,
+    /** main.js：局结束复位 */
+    resetSandbox: resetSandbox,
+    /** ui.js：道具面板追加"生成器"行 */
+    getItemPanelRows: getItemPanelRows,
+    /** main.js：处理 dev: 前缀的道具点击 */
+    handleItemUse: handleItemUse,
+    /** 调试用：当前是否沙盒局 */
+    isSandbox: function () { return sandboxActive; }
+  };
+
+})(window);

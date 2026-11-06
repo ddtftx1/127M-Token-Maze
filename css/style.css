@@ -142,6 +142,7 @@ html, body {
   padding: calc(12px + var(--safe-t)) calc(12px + var(--safe-r))
            calc(12px + var(--safe-b)) calc(12px + var(--safe-l));
   background: radial-gradient(circle at 50% 20%, rgba(20, 40, 70, 0.55), rgba(3, 6, 12, 0.94));
+  -webkit-backdrop-filter: blur(2px);
   backdrop-filter: blur(2px);
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
@@ -174,6 +175,7 @@ html, body {
 
 /* ---------- 主菜单 ---------- */
 .game-title {
+  font-size: 40px;                        /* Chrome 49 降级值（不支持 clamp） */
   font-size: clamp(30px, 9vw, 46px);
   font-weight: 900;
   text-align: center;
@@ -396,6 +398,7 @@ html, body {
   border-radius: 11px;
   background: rgba(8, 14, 24, 0.66);
   border: 1px solid rgba(120, 190, 255, 0.16);
+  -webkit-backdrop-filter: blur(6px);
   backdrop-filter: blur(6px);
 }
 .stat-label { font-size: 10px; color: var(--text-dim); letter-spacing: 1px; }
@@ -420,6 +423,7 @@ html, body {
   color: var(--text);
   background: rgba(8, 14, 24, 0.7);
   border: 1px solid rgba(120, 190, 255, 0.18);
+  -webkit-backdrop-filter: blur(6px);
   backdrop-filter: blur(6px);
   display: flex;
   align-items: center;
@@ -457,6 +461,7 @@ html, body {
   display: flex;
   align-items: center;
   justify-content: center;
+  -webkit-backdrop-filter: blur(6px);
   backdrop-filter: blur(6px);
 }
 /* 指南针指针：容器负责旋转（轴心严格居中），内层三角负责形状 */
@@ -474,6 +479,7 @@ html, body {
   width: 10px;
   height: 17px;
   background: currentColor;
+  -webkit-clip-path: polygon(50% 0%, 0% 100%, 100% 100%);   /* Chrome 49 只认前缀写法 */
   clip-path: polygon(50% 0%, 0% 100%, 100% 100%);
 }
 .compass-dist {
@@ -484,6 +490,8 @@ html, body {
 
 .minimap-wrap {
   position: relative;
+  width: 168px;                           /* Chrome 49 降级值（不支持 min） */
+  height: 168px;
   width: min(34vw, 168px);
   height: min(34vw, 168px);
 }
@@ -494,6 +502,7 @@ html, body {
   border-radius: 14px;
   background: rgba(8, 14, 24, 0.72);
   border: 1px solid rgba(120, 190, 255, 0.2);
+  -webkit-backdrop-filter: blur(6px);
   backdrop-filter: blur(6px);
 }
 
@@ -514,6 +523,7 @@ html, body {
   text-align: center;
   background: rgba(8, 14, 24, 0.82);
   border: 1px dashed rgba(120, 190, 255, 0.28);
+  -webkit-backdrop-filter: blur(6px);
   backdrop-filter: blur(6px);
   pointer-events: none;
 }
@@ -913,6 +923,7 @@ html, body {
   border-radius: 14px;
   background: rgba(8, 14, 24, 0.88);
   border: 1px solid rgba(120, 190, 255, 0.28);
+  -webkit-backdrop-filter: blur(6px);
   backdrop-filter: blur(6px);
   z-index: 45;
   max-width: calc(100vw - 24px);
@@ -1132,6 +1143,7 @@ html, body {
   .screen { padding: calc(6px + var(--safe-t)) calc(6px + var(--safe-r))
                      calc(6px + var(--safe-b)) calc(6px + var(--safe-l)); }
   .panel {
+    max-width: 920px;                     /* Chrome 49 降级值 */
     max-width: min(96vw, 920px);
     max-height: calc(100vh - 12px);
     max-height: calc(100dvh - 12px);
@@ -1141,11 +1153,11 @@ html, body {
     padding: 12px 18px;
     border-radius: 16px;
   }
-  .panel-narrow { max-width: min(92vw, 560px); }
+  .panel-narrow { max-width: 560px; max-width: min(92vw, 560px); }
   .panel-title { font-size: 18px; margin-bottom: 8px; }
 
   /* 主菜单：两列 */
-  .menu-panel { max-width: min(96vw, 940px); }
+  .menu-panel { max-width: 940px; max-width: min(96vw, 940px); }
   .menu-hero { text-align: center; }
   .game-title { font-size: 26px; letter-spacing: 2px; margin-bottom: 2px; }
   .subtitle { font-size: 12px; margin-bottom: 6px; }
@@ -1176,7 +1188,7 @@ html, body {
   .hint-text { margin-top: 8px; font-size: 10.5px; line-height: 1.6; }
 
   /* 设置面板：两列分组 */
-  .settings-panel { max-width: min(96vw, 900px); }
+  .settings-panel { max-width: 900px; max-width: min(96vw, 900px); }
   .settings-scroll {
     display: grid;
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
@@ -1242,7 +1254,7 @@ html, body {
     gap: 10px;
   }
   #pause-menu .menu-vertical > button { min-height: 48px; }
-  #pause-menu .panel-narrow { max-width: min(90vw, 460px); }
+  #pause-menu .panel-narrow { max-width: 460px; max-width: min(90vw, 460px); }
 
   /* 道具面板 / 幽灵 / 彩蛋：窄面板压缩 */
   .item-panel-hint { margin-top: 8px; }
@@ -1268,7 +1280,7 @@ html, body {
   .compass-arrow { width: 11px; height: 16px; }
   .compass-needle { width: 8px; height: 13.5px; }
   .compass-dist { font-size: 10px; }
-  .minimap-wrap { width: min(26vh, 132px); height: min(26vh, 132px); }
+  .minimap-wrap { width: 132px; height: 132px; width: min(26vh, 132px); height: min(26vh, 132px); }
   #minimap { border-radius: 12px; }
 
   /* 极矮横屏（320 / 360 高）小地图缩小后，锁定占位文案与提示要能完整显示 */
@@ -1331,6 +1343,539 @@ body[data-colorblind="1"] .item-count {
 }
 
 /* ============================================================
+   每日签到（js/checkin.js）
+   ------------------------------------------------------------
+   - 入口按钮 .sign-entry：竖屏在「商店」与「成就」之间，横屏由 JS 搬到左列难度卡下方
+   - 7 格进度：已签（对勾）/ 今天（闹钟）/ 未来（锁，不可点击）
+   - 布局一律用 flex + margin 实现，不用 grid 与 gap：
+     Chrome 49（Win7）既没有 CSS Grid，也没有 flex 的 gap
+   ============================================================ */
+
+/* ---------- 入口按钮 ---------- */
+.sign-entry { position: relative; }
+.sign-entry.is-claimed { opacity: 0.62; }
+.sign-dot {
+  position: absolute;
+  top: 5px;
+  right: 7px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--danger);
+  box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.35), 0 0 8px var(--danger);
+  animation: signDotPulse 1.6s ease-in-out infinite;
+}
+@keyframes signDotPulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.35); opacity: 0.6; }
+}
+
+/* ---------- 面板 ---------- */
+.sign-panel { max-width: 560px; }
+
+.sign-stats {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  font-size: 13px;
+  color: var(--text-dim);
+  margin-bottom: 8px;
+}
+.sign-stats > span { margin: 0 7px; }
+.sign-stats b { color: var(--text); font-size: 15px; }
+
+.sign-shield {
+  text-align: center;
+  font-size: 12.5px;
+  color: var(--text-dim);
+  line-height: 1.6;
+  margin-bottom: 10px;
+}
+.sign-shield-empty { opacity: 0.7; }
+
+/* ---------- 7 格进度 ---------- */
+.sign-grid {
+  display: flex;
+  flex-wrap: wrap;
+  margin: 0 -4px 6px;
+}
+.sign-cell {
+  position: relative;
+  flex: 0 0 calc(14.2857% - 8px);
+  margin: 4px;
+  min-height: 78px;
+  border: 1px solid var(--panel-border);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.03);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 8px 3px;
+}
+.sign-cell-icon {
+  width: 26px;
+  height: 26px;
+  display: block;
+  margin-bottom: 3px;
+}
+.sign-cell-icon > svg { width: 100%; height: 100%; display: block; }
+.sign-cell-text { font-size: 11px; color: var(--text-dim); line-height: 1; }
+
+.sign-done { opacity: 0.55; }
+.sign-future { opacity: 0.32; }
+.sign-today {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent) inset, 0 0 16px rgba(53, 208, 255, 0.3);
+  animation: signBreathe 2.4s ease-in-out infinite;
+}
+.sign-today .sign-cell-text { color: var(--accent); font-weight: 700; }
+@keyframes signBreathe {
+  0%, 100% { box-shadow: 0 0 0 1px var(--accent) inset, 0 0 10px rgba(53, 208, 255, 0.22); }
+  50% { box-shadow: 0 0 0 2px var(--accent) inset, 0 0 20px rgba(53, 208, 255, 0.42); }
+}
+.sign-cell-corner {
+  position: absolute;
+  right: 3px;
+  bottom: 3px;
+  width: 15px;
+  height: 15px;
+  opacity: 0.85;
+}
+.sign-cell-corner > svg { width: 100%; height: 100%; display: block; }
+
+/* ---------- 奖励预告 / 按钮 / 倒计时 ---------- */
+.sign-reward {
+  text-align: center;
+  font-size: 13.5px;
+  color: var(--text);
+  line-height: 1.6;
+  min-height: 22px;
+  margin-bottom: 10px;
+}
+.sign-reward .svg-icon { width: 1.05em; height: 1.05em; }
+.sign-actions {
+  display: flex;
+  align-items: stretch;
+}
+.sign-actions > * { flex: 0 0 auto; }
+.sign-actions > * + * { margin-left: 10px; }
+.sign-claim-btn { flex: 1 1 auto; }
+.sign-claim-btn.is-disabled { opacity: 0.5; }
+.sign-countdown {
+  text-align: center;
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-top: 9px;
+  line-height: 1.5;
+}
+.sign-hint {
+  margin-top: 4px;
+  font-size: 11.5px;
+  line-height: 1.55;
+}
+
+/* ---------- 竖屏：4 + 3 两行 ---------- */
+@media (orientation: portrait) {
+  .sign-cell { flex: 0 0 calc(25% - 8px); min-height: 82px; }
+}
+
+/* ---------- 超窄屏 ---------- */
+@media (max-width: 380px) {
+  .sign-cell { min-height: 68px; }
+  .sign-cell-icon { width: 22px; height: 22px; }
+  .sign-cell-text { font-size: 10px; }
+  .sign-stats { font-size: 12px; }
+  .sign-reward { font-size: 12.5px; }
+}
+
+/* ---------- 手机横屏矮屏：整体压一档，保证 7 格一行放得下 ---------- */
+@media (orientation: landscape) and (max-height: 640px) and (hover: none) and (pointer: coarse) {
+  .sign-cell { min-height: 62px; }
+  .sign-cell-icon { width: 22px; height: 22px; }
+  .sign-panel { max-width: 720px; max-width: min(96vw, 720px); }
+  .sign-stats { font-size: 12px; margin-bottom: 4px; }
+  .sign-shield { font-size: 11.5px; margin-bottom: 6px; }
+  .sign-reward { font-size: 12.5px; margin-bottom: 6px; }
+  .sign-countdown { margin-top: 5px; }
+}
+
+/* ---------- 减少动效偏好 ---------- */
+@media (prefers-reduced-motion: reduce) {
+  .sign-dot, .sign-today { animation: none; }
+}
+
+/* ============================================================
+   开发者选项（js/dev.js）
+   ------------------------------------------------------------
+   - 隐藏入口：主菜单长按商店 → 两题验证 → 本会话内可用
+   - 全部用 flex + margin 实现，不用 CSS Grid / flex gap（Chrome 49 兼容）
+   - 竖屏：页签横向 chips + 卡片纵向堆叠；横屏：左侧竖向页签栏
+   ============================================================ */
+
+.dev-panel {
+  max-width: 940px;
+  display: flex;
+  flex-direction: column;
+  /* 关键：column 方向下 wrap 会把超出高度的子项换到"右边一列"，
+     面板内容一长就横向溢出、页签与内容错位。竖屏固定 nowrap，
+     横屏的两栏布局在下方媒体查询里单独开 wrap。 */
+  flex-wrap: nowrap;
+  /* 面板内部自己滚动（.panel 已带 overflow-y:auto），这里保证能被子项压缩 */
+  min-height: 0;
+  padding-bottom: calc(10px + var(--safe-b));
+}
+
+/* 竖屏下若内容比屏幕高：靠 margin:auto 居中，溢出时自动退回顶部（不会出现"顶部永远滚不到"） */
+#dev-screen { align-items: flex-start; }
+#dev-screen .dev-panel { margin: auto; }
+
+/* ---------- 页签 ---------- */
+.dev-tabs {
+  flex: 0 0 auto;
+  display: flex;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+  min-width: 0;
+  min-height: 0;
+  margin: 0 -4px 8px;
+  padding-bottom: 2px;
+}
+.dev-tab {
+  flex: 0 0 auto;
+  margin: 0 4px;
+  padding: 7px 13px;
+  min-height: 34px;
+  border-radius: 999px;
+  border: 1px solid var(--panel-border);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-dim);
+  font-size: 13px;
+  cursor: pointer;
+}
+.dev-tab.is-active {
+  color: #04121b;
+  background: var(--accent);
+  border-color: var(--accent);
+  font-weight: 700;
+}
+
+/* ---------- 内容区 ---------- */
+.dev-body {
+  flex: 1 1 auto;
+  /* min-height:0 是 flex 子项能真正收缩的前提；不写的话长内容会把面板撑破，
+     overflow:auto 形同虚设（横屏 + 长 .dev-pre 时尤其明显） */
+  min-height: 0;
+  min-width: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  -webkit-overflow-scrolling: touch;
+  padding-right: 2px;
+}
+
+.dev-card {
+  border: 1px solid var(--panel-border);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.03);
+  padding: 10px 12px;
+  margin-bottom: 10px;
+}
+.dev-card-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+.dev-card-head b { font-size: 13.5px; color: var(--text); }
+.dev-card-head span { font-size: 11px; color: var(--text-dim); }
+
+/* ---------- 行 / 按钮 ---------- */
+.dev-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  margin: 0 -4px 6px;
+}
+.dev-row > * { margin: 3px 4px; }
+.dev-row > label { font-size: 12px; color: var(--text-dim); }
+
+.dev-btn {
+  flex: 0 0 auto;
+  min-height: 32px;
+  padding: 6px 11px;
+  border-radius: 9px;
+  border: 1px solid var(--panel-border);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text);
+  font-size: 12.5px;
+  line-height: 1.2;
+  cursor: pointer;
+}
+.dev-btn:active { transform: scale(0.97); }
+.dev-btn.is-active {
+  border-color: var(--accent);
+  background: rgba(53, 208, 255, 0.18);
+  color: var(--accent);
+}
+.dev-btn.is-primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #04121b;
+  font-weight: 700;
+}
+.dev-btn.is-danger {
+  border-color: var(--danger);
+  color: var(--danger);
+  background: rgba(255, 93, 108, 0.08);
+}
+
+.dev-btn-grid {
+  display: flex;
+  flex-wrap: wrap;
+  margin: 0 -4px;
+}
+.dev-btn-grid > * { flex: 0 0 auto; margin: 3px 4px; }
+
+/* ---------- 表单控件 ---------- */
+.dev-input, .dev-select, .dev-textarea {
+  flex: 1 1 auto;
+  min-width: 120px;
+  min-height: 34px;
+  padding: 7px 10px;
+  border-radius: 9px;
+  border: 1px solid var(--panel-border);
+  background: rgba(0, 0, 0, 0.35);
+  color: var(--text);
+  font-size: 13px;
+  -webkit-user-select: text;
+  -moz-user-select: text;
+  user-select: text;
+}
+.dev-textarea {
+  width: 100%;
+  min-height: 84px;
+  font-family: monospace;
+  font-size: 11.5px;
+  line-height: 1.5;
+  margin-bottom: 6px;
+  resize: vertical;
+}
+.dev-range { flex: 1 1 120px; min-width: 100px; }
+
+/* ---------- 键值 / 提示 / 等宽 ---------- */
+.dev-kv { margin-bottom: 6px; }
+.dev-kv-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 3px 0;
+  border-bottom: 1px dashed rgba(120, 190, 255, 0.14);
+  font-size: 12px;
+}
+.dev-kv-k { color: var(--text-dim); }
+.dev-kv-v { color: var(--text); text-align: right; word-break: break-all; }
+.dev-hint { font-size: 11.5px; color: var(--text-dim); line-height: 1.6; margin: 4px 0; }
+.dev-tag {
+  display: inline-block;
+  margin-left: 5px;
+  padding: 0 5px;
+  border-radius: 5px;
+  background: rgba(255, 210, 74, 0.16);
+  color: #ffd24a;
+  font-size: 10px;
+  vertical-align: middle;
+}
+.dev-warn {
+  margin: 0 0 8px;
+  padding: 6px 9px;
+  border-radius: 8px;
+  border: 1px solid var(--danger);
+  background: rgba(255, 93, 108, 0.1);
+  color: #ffb3bb;
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+.dev-mono { font-family: monospace; font-size: 12px; color: var(--text-dim); }
+
+.dev-details {
+  border: 1px solid rgba(120, 190, 255, 0.14);
+  border-radius: 9px;
+  padding: 6px 9px;
+  margin-bottom: 6px;
+}
+.dev-details > summary {
+  cursor: pointer;
+  font-size: 12px;
+  display: flex;
+  justify-content: space-between;
+  outline: none;
+}
+.dev-key { font-family: monospace; color: var(--text); }
+.dev-size { color: var(--text-dim); }
+.dev-pre {
+  margin: 6px 0;
+  padding: 8px;
+  max-height: 200px;
+  overflow: auto;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.45);
+  color: var(--text-dim);
+  font-family: monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+  -webkit-user-select: text;
+  -moz-user-select: text;
+  user-select: text;
+}
+
+/* ---------- 图标页 ---------- */
+.dev-icon-grid {
+  display: flex;
+  flex-wrap: wrap;
+  margin: 0 -4px;
+}
+.dev-icon-cell {
+  flex: 0 0 auto;
+  width: 72px;
+  margin: 4px;
+  padding: 6px 3px;
+  border-radius: 10px;
+  border: 1px solid rgba(120, 190, 255, 0.16);
+  background: rgba(255, 255, 255, 0.03);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  cursor: pointer;
+}
+.dev-icon-box { width: 30px; height: 30px; margin-bottom: 3px; }
+.dev-icon-box > svg { width: 100%; height: 100%; display: block; }
+.dev-icon-key { font-family: monospace; font-size: 10px; color: var(--text); }
+.dev-icon-use { font-size: 9px; color: var(--text-dim); text-align: center; line-height: 1.2; }
+
+.dev-icon-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  min-height: 40px;
+  margin-top: 4px;
+  padding: 6px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.3);
+}
+.dev-icon-one {
+  width: 30px;
+  height: 30px;
+  margin: 2px 4px;
+  display: inline-block;
+}
+.dev-icon-one > svg { width: 100%; height: 100%; display: block; }
+
+.dev-baseline { align-items: baseline; }
+.dev-em1 { font-size: 1em; display: inline-flex; align-items: center; color: var(--text-dim); }
+.dev-em2 { font-size: 2em; display: inline-flex; align-items: center; color: var(--text-dim); }
+.dev-em3 { font-size: 3em; display: inline-flex; align-items: center; color: var(--text-dim); }
+
+/* ---------- 日志页 ---------- */
+.dev-log-list { max-height: 46vh; overflow-y: auto; margin-bottom: 6px; }
+.dev-log-item {
+  display: flex;
+  align-items: flex-start;
+  padding: 3px 0;
+  border-bottom: 1px dashed rgba(120, 190, 255, 0.12);
+  font-family: monospace;
+  font-size: 11px;
+  line-height: 1.5;
+}
+.dev-log-t { flex: 0 0 auto; color: var(--text-dim); margin-right: 6px; }
+.dev-log-lv { flex: 0 0 auto; width: 44px; text-transform: uppercase; }
+.dev-log-tx { flex: 1 1 auto; word-break: break-all; color: var(--text); }
+.dev-log-item.is-warn .dev-log-lv { color: #ffd24a; }
+.dev-log-item.is-error .dev-log-lv { color: var(--danger); }
+.dev-log-item.is-error .dev-log-tx { color: #ffb3bb; }
+
+/* ---------- 底部状态条 ---------- */
+.dev-footer {
+  flex: 0 0 auto;
+  border-top: 1px solid var(--panel-border);
+  padding-top: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+}
+.dev-status {
+  flex: 1 1 140px;
+  min-height: 16px;
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--text-dim);
+  margin-right: 8px;
+}
+.dev-status.is-ok { color: var(--accent-2); }
+.dev-status.is-err { color: var(--danger); }
+.dev-footer-btns { display: flex; flex: 0 0 auto; }
+.dev-footer-btns > * + * { margin-left: 8px; }
+
+/* ---------- 横屏（触屏设备）：左侧竖向页签栏 ----------
+   与主菜单的横屏紧凑布局用同一组限定条件（(hover:none) and (pointer:coarse)）：
+   否则桌面浏览器把窗口拉宽也会切到"左侧竖排页签 + 右侧内容"的两栏形态，与主布局口径不一致 */
+@media (orientation: landscape) and (hover: none) and (pointer: coarse) {
+  .dev-panel {
+    max-width: 1000px;                    /* Chrome 49 降级值 */
+    max-width: min(96vw, 1000px);
+    display: flex;
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: stretch;
+  }
+  /* 横屏时标题横跨上方，用 flex-wrap 让 tabs 与 body 并排 */
+  .dev-panel > .panel-title { flex: 0 0 100%; }
+  .dev-tabs {
+    flex: 0 0 128px;
+    flex-direction: column;
+    flex-wrap: nowrap;
+    min-width: 0;
+    min-height: 0;
+    overflow-x: hidden;
+    overflow-y: auto;
+    margin: 0 10px 0 0;
+  }
+  .dev-tab {
+    margin: 0 0 6px;
+    width: 100%;
+    border-radius: 10px;
+    text-align: center;
+  }
+  .dev-body { flex: 1 1 auto; }
+  .dev-footer { flex: 0 0 100%; }
+}
+
+/* ---------- 手机横屏矮屏：整体压一档 ---------- */
+@media (orientation: landscape) and (max-height: 640px) and (hover: none) and (pointer: coarse) {
+  .dev-tabs { flex-basis: 104px; }
+  .dev-tab { padding: 5px 8px; min-height: 30px; font-size: 12px; }
+  .dev-card { padding: 8px 10px; margin-bottom: 8px; }
+  .dev-log-list { max-height: 34vh; }
+}
+
+/* ---------- 超窄屏 ---------- */
+@media (max-width: 380px) {
+  .dev-icon-cell { width: 62px; }
+  .dev-btn { font-size: 12px; padding: 6px 9px; }
+  .dev-tab { font-size: 12px; padding: 6px 10px; }
+}
+
+/* ---------- 触屏：热区抬到推荐尺寸 ----------
+   顺序必须在本段基础规则之后，否则会被上面的 min-height 覆盖 */
+@media (hover: none) and (pointer: coarse) {
+  .dev-tab { min-height: 40px; padding: 8px 14px; }
+  .dev-btn { min-height: 40px; padding: 9px 12px; font-size: 13px; }
+}
+
+/* ============================================================
    老内核降级（Chrome 49 / Win7 等）
    ------------------------------------------------------------
    由启动时的特性检测（js/main.js → applyLegacyClasses）给 body 加 class，
@@ -1370,3 +1915,27 @@ body.legacy-gap .shop-list > * + * { margin-top: 8px; }
 body.legacy-gap .item-list > * + * { margin-top: 8px; }
 body.legacy-gap .hud-stats > * + * { margin-left: 5px; }
 body.legacy-gap .hud-buttons > * + * { margin-left: 5px; }
+body.legacy-gap .sign-stats > * + * { margin-left: 14px; }
+body.legacy-gap .sign-actions > * + * { margin-left: 10px; }
+body.legacy-gap .dev-row > * + * { margin-left: 8px; }
+body.legacy-gap .dev-btn-grid > * + * { margin-left: 8px; }
+body.legacy-gap .dev-footer-btns > * + * { margin-left: 8px; }
+/* 以下为补齐：这些容器也用了 flex gap，缺兜底时 Chrome 49 下会全部贴在一起 */
+body.legacy-gap .diff-card > * + * { margin-top: 4px; }
+body.legacy-gap .seed-row > * + * { margin-left: 8px; }
+body.legacy-gap .hud-top > * + * { margin-left: 8px; }
+body.legacy-gap .hud-right > * + * { margin-top: 8px; }
+body.legacy-gap .compass > * + * { margin-top: 2px; }
+body.legacy-gap .minimap-lock > * + * { margin-top: 4px; }
+body.legacy-gap .hud-bottom-right > * + * { margin-top: 10px; }
+body.legacy-gap .setting-row > * + * { margin-top: 8px; }
+body.legacy-gap .ranking-tabs > * + * { margin-left: 8px; }
+body.legacy-gap .ranking-list li > * + * { margin-left: 10px; }
+body.legacy-gap .ranking-list .rk-info > * + * { margin-top: 2px; }
+body.legacy-gap .replay-bar > * + * { margin-left: 8px; }
+body.legacy-gap .shop-card > * + * { margin-left: 10px; }
+body.legacy-gap .shop-info > * + * { margin-top: 3px; }
+body.legacy-gap .shop-buy > * + * { margin-top: 6px; }
+body.legacy-gap .item-row > * + * { margin-left: 10px; }
+body.legacy-gap .ghost-remember-row > * + * { margin-left: 8px; }
+body.legacy-gap .settings-scroll > * + * { margin-top: 10px; }

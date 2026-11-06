@@ -89,17 +89,17 @@
   /** 合并并校验外部数据，保证类型与范围合法 */
   function mergeValidated(data) {
     if (!data || typeof data !== 'object') return;
-    if (typeof data.fov === 'number') settings.fov = clamp(data.fov, 60, 110);
+    if (typeof data.fov === 'number' && isFinite(data.fov)) settings.fov = clamp(data.fov, 60, 110);
     if (typeof data.invertYaw === 'boolean') settings.invertYaw = data.invertYaw;
     if (typeof data.invertPitch === 'boolean') settings.invertPitch = data.invertPitch;
-    if (typeof data.sensitivity === 'number') settings.sensitivity = clamp(data.sensitivity, 0.2, 3);
-    if (typeof data.moveSpeed === 'number') settings.moveSpeed = clamp(data.moveSpeed, 0.5, 2);
+    if (typeof data.sensitivity === 'number' && isFinite(data.sensitivity)) settings.sensitivity = clamp(data.sensitivity, 0.2, 3);
+    if (typeof data.moveSpeed === 'number' && isFinite(data.moveSpeed)) settings.moveSpeed = clamp(data.moveSpeed, 0.5, 2);
     if (['low', 'mid', 'high'].indexOf(data.quality) >= 0) settings.quality = data.quality;
     if (typeof data.shadows === 'boolean') settings.shadows = data.shadows;
     if (typeof data.fog === 'boolean') settings.fog = data.fog;
     if (typeof data.minimap === 'boolean') settings.minimap = data.minimap;
     if (typeof data.minimapCoins === 'boolean') settings.minimapCoins = data.minimapCoins;
-    if (typeof data.volume === 'number') settings.volume = clamp(data.volume, 0, 1);
+    if (typeof data.volume === 'number' && isFinite(data.volume)) settings.volume = clamp(data.volume, 0, 1);
     if (typeof data.sfx === 'boolean') settings.sfx = data.sfx;
     if (['tech', 'dungeon', 'forest'].indexOf(data.theme) >= 0) settings.theme = data.theme;
     if (typeof data.colorblind === 'boolean') settings.colorblind = data.colorblind;
@@ -133,11 +133,17 @@
   /** 修改单个设置项并广播（realTime 表示是否需要立即作用于引擎） */
   function setSetting(key, value) {
     if (!(key in DEFAULT_SETTINGS)) return;
-    settings[key] = value;
+    // 走与加载时同一套校验：原来只判 key 存在，运行时写入非法值（字符串 fov、
+    // 越界音量）照样落盘，下次启动才被静默丢弃。这里用探测对象过一遍，
+    // 非法值会因校验不通过而保持原值。
+    var probe = assign({}, settings);
+    probe[key] = value;
+    mergeValidated(probe);
     // 用户手动改过画质 → 关掉自动性能适配，避免下次加载被静默降回 mid
     if (key === 'quality') settings.autoPerformance = false;
     saveSettings();
-    emit({ key: key, value: value, settings: settings });
+    // 广播生效值而不是入参：非法入参被校验丢弃时，监听者拿到的必须是真正生效的值
+    emit({ key: key, value: settings[key], settings: settings });
   }
 
   /** 批量应用（用于 UI 初始化同步，不触发广播） */
@@ -172,7 +178,13 @@
   function loadRecords() {
     var raw = safeGet(RECORD_KEY);
     if (!raw) return {};
-    try { return JSON.parse(raw) || {}; } catch (e) { return {}; }
+    try {
+      var v = JSON.parse(raw);
+      // 结构损坏（顶层是数字/字符串、或某个难度项不是对象）时按空记录处理，
+      // 否则 submitRecord 里 cur.time 恒 undefined、成绩从此刻起永不更新
+      if (!v || typeof v !== 'object') return {};
+      return v;
+    } catch (e) { return {}; }
   }
   function saveRecords(rec) { safeSet(RECORD_KEY, JSON.stringify(rec)); }
 
@@ -182,7 +194,10 @@
    */
   function submitRecord(diff, time, steps) {
     var rec = loadRecords();
+    if (!isFinite(Number(time))) time = 0;
+    if (!isFinite(Number(steps))) steps = 0;
     var cur = rec[diff];
+    if (cur && (typeof cur !== 'object' || !isFinite(cur.time) || !isFinite(cur.steps))) cur = null;
     var isBest = false;
     // 时间按 1ms 容差比较：存储的是未舍入的 elapsed，浮点严格相等几乎不可能命中，
     // 会导致"同样快但步数更少"无法更新记录

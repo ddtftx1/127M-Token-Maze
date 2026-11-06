@@ -91,13 +91,15 @@
     return out;
   }
 
-  /** 每日挑战种子（按世界时区日期，全球一致） */
+  /** 两位补零（不用 String.prototype.padStart：Chrome 49 / Win7 没有这个 ES2017 方法） */
+  function pad2(n) {
+    return n < 10 ? '0' + n : '' + n;
+  }
+
+  /** 每日挑战种子（按本地日期） */
   function dailySeed() {
     var d = new Date();
-    var y = d.getFullYear();
-    var m = String(d.getMonth() + 1).padStart(2, '0');
-    var day = String(d.getDate()).padStart(2, '0');
-    return 'daily-' + y + m + day;
+    return 'daily-' + d.getFullYear() + pad2(d.getMonth() + 1) + pad2(d.getDate());
   }
 
   /* ------------------------------------------------------------

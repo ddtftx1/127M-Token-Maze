@@ -32,15 +32,21 @@
       for (var i = 0; i < DIFF_KEYS.length; i++) {
         var k = DIFF_KEYS[i];
         if (Object.prototype.toString.call(data[k]) === '[object Array]') {
-          var arr = data[k].slice(0, MAX_ENTRIES);
-          // 旧数据兼容：没有 seq 的记录按现有顺序补发提交序号（先来的序号小）
-          for (var j = 0; j < arr.length; j++) {
-            var it = arr[j];
-            if (it && typeof it === 'object' && !(typeof it.seq === 'number' && isFinite(it.seq))) {
-              it.seq = j;
-            }
+          // 逐条过滤损坏记录：缺 time/steps 的条目会让 compareEntries 算出 NaN，
+          // Array.sort 的结果随之不确定（可能把坏条目排到第 1），宁可直接丢弃
+          var arr = [];
+          for (var j = 0; j < data[k].length; j++) {
+            var it = data[k][j];
+            if (!it || typeof it !== 'object') continue;
+            if (typeof it.time !== 'number' || !isFinite(it.time)) continue;
+            if (typeof it.steps !== 'number' || !isFinite(it.steps)) continue;
+            // 旧数据兼容：没有 seq 的记录按现有顺序补发提交序号（先来的序号小）
+            if (!(typeof it.seq === 'number' && isFinite(it.seq))) it.seq = arr.length;
+            arr.push(it);
           }
-          out[k] = arr;
+          // 先排序再截断：磁盘里若是乱序（早期版本 / 手工改），直接 slice 会把更优成绩丢掉
+          arr.sort(compareEntries);
+          out[k] = arr.slice(0, MAX_ENTRIES);
         }
       }
     }
@@ -95,11 +101,16 @@
    */
   function add(diffKey, entry) {
     entry = entry || {};
+    // 只认三个难度分区：否则会新建出 'easy' 之类的分区写盘，下次加载又丢弃（静默不一致）
+    if (DIFF_KEYS.indexOf(diffKey) < 0) return { rank: 0, list: [] };
+    // 时间必须是有限正数：缺省/NaN 会被 Number()||0 变成 0 秒并直占榜首
+    var t = Number(entry.time);
+    if (!isFinite(t) || t <= 0) return { rank: 0, list: list(diffKey) };
     var all = loadAll();
     var arr = all[diffKey] || (all[diffKey] = []);
 
     var record = {
-      time: Math.round((Number(entry.time) || 0) * 100) / 100,
+      time: Math.round(t * 100) / 100,
       steps: Math.max(0, Math.floor(Number(entry.steps) || 0)),
       auto: !!entry.auto,
       seed: String(entry.seed == null ? '' : entry.seed),
@@ -121,6 +132,7 @@
 
   /** 清空某难度的排行榜 */
   function clear(diffKey) {
+    if (DIFF_KEYS.indexOf(diffKey) < 0) return;
     var all = loadAll();
     all[diffKey] = [];
     saveAll(all);

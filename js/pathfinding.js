@@ -29,6 +29,8 @@
   };
   MinHeap.prototype.pop = function () {
     var items = this._items;
+    // 空堆直接返回哨兵：调用方虽都先判 size，但这是数据结构本身该有的防护
+    if (items.length === 0) return -1;
     var top = items[0];
     var last = items.pop();
     if (items.length > 0) {
@@ -420,7 +422,8 @@
   }
 
   /* ------------------------------------------------------------
-   * 顺路收集路径：为"最佳路径"在最短路径附近的目标（金币/地图）处插入绕行段
+   * 顺路收集（贪心）：沿最短路径推进时优先吃掉可顺路到达的目标（金币/地图），
+   * 即"最佳路径"的实现。原先在路径序列里"插入绕行段"的旧实现已删除（BUG-026）。
    * ---------------------------------------------------------- */
 
   /** 从 (x, y) 出发的全图 BFS 距离图（-1 表示不可达） */
@@ -446,128 +449,6 @@
       }
     }
     return dist;
-  }
-
-  /**
-   * 筛选"顺路可收集"的目标：与路径的**真实行走距离**（BFS 步数）不超过 maxDetour
-   * 注意：不能用曼哈顿距离——墙体会让"看着近"的格子实际绕很远
-   * @param {Object} maze
-   * @param {Array<{x,y}>} basePath 基础网格路径
-   * @param {Array<{x,y}>} targets 目标网格坐标
-   * @param {Object} [opts] { maxDetour:number } 真实步数阈值，默认 6
-   * @returns {Array<{x,y,entry,dist}>} 被接受的目标（dist=与路径的真实距离；dist=0 表示路径正好穿过）
-   */
-  function findCollectTargets(maze, basePath, targets, opts) {
-    var out = [];
-    if (!basePath || basePath.length === 0 || !targets || targets.length === 0) return out;
-    var maxDetour = (opts && typeof opts.maxDetour === 'number') ? opts.maxDetour : 6;
-    var size = maze.size;
-
-    for (var k = 0; k < targets.length; k++) {
-      var item = targets[k];
-      if (!item || !isWalkable(maze, item.x, item.y)) continue;
-
-      // 真实可行走距离（BFS）：从目标格出发，找路径上最近的可达格
-      var distMap = bfsDistMap(maze, item.x, item.y);
-      var bestI = -1, bestD = Infinity;
-      for (var i = 0; i < basePath.length; i++) {
-        var d = distMap[basePath[i].y * size + basePath[i].x];
-        if (d < 0) continue; // 不可达
-        if (d < bestD) { bestD = d; bestI = i; }
-        if (d === 0) break;
-      }
-      if (bestI < 0) continue;            // 不可达
-      if (bestD > maxDetour) continue;    // 绕行太远：不顺路
-      out.push({ x: item.x, y: item.y, entry: bestI, dist: bestD });
-    }
-    return out;
-  }
-
-  /**
-   * 生成"顺路收集"路径：沿最短路径前进，并对路径附近的目标插入绕行
-   * - 目标与路径的**真实行走距离**超过 maxDetour 时视为"不顺路"，直接忽略
-   * - 绕行后会在路径前方寻找代价最小的回归点，避免回头路太长
-   * - 绕行回归时不允许"跳过"未拾取目标所在的路段，避免漏拾
-   * @param {Object} maze 迷宫数据
-   * @param {Array<{x,y}>} basePath 基础网格路径（A* 输出，含起终点）
-   * @param {Array<{x,y}>} targets 需要顺路拾取的目标网格坐标
-   * @param {Object} [opts] { maxDetour: number, maxSkip: number }
-   *        maxDetour=顺路真实步数阈值（默认 6）；maxSkip=回归点最多向前跳过的路径点数（默认 20）
-   * @returns {Array<{x,y}>} 新路径（含绕行段）
-   */
-  function buildCollectPath(maze, basePath, targets, opts) {
-    if (!basePath || basePath.length < 2) return basePath ? basePath.slice() : [];
-    if (!targets || targets.length === 0) return basePath.slice();
-    var size = maze.size;
-    var result = basePath.slice();
-
-    // 目标格集合（用于防止绕行回归时"跳过"未拾取目标所在路段）
-    var targetSet = {};
-    for (var t = 0; t < targets.length; t++) {
-      var tg = targets[t];
-      if (!tg || !isWalkable(maze, tg.x, tg.y)) continue;
-      targetSet[tg.y * size + tg.x] = 1;
-    }
-
-    // 筛选顺路目标（真实距离）；"路径正好穿过"的无需绕行
-    var accepted = findCollectTargets(maze, basePath, targets, opts);
-    var plans = [];
-    for (var k = 0; k < accepted.length; k++) {
-      if (accepted[k].dist === 0) continue; // 路径正好穿过：无需绕行
-      plans.push({ x: accepted[k].x, y: accepted[k].y, entry: accepted[k].entry });
-    }
-    plans.sort(function (a, b) { return a.entry - b.entry; });
-
-    // 从后往前插入，保证前面计划的索引不失效
-    for (var p = plans.length - 1; p >= 0; p--) {
-      result = spliceDetour(maze, result, plans[p], targetSet, size, opts);
-    }
-    return result;
-  }
-
-  /**
-   * 在路径中插入一段"前往目标并回归"的绕行（内部函数）
-   * @param {Object} maze 迷宫数据
-   * @param {Array<{x,y}>} result 当前路径
-   * @param {{x:number,y:number,entry:number}} plan 目标与插入位置
-   * @param {Object} targetSet 目标格集合（防止回归时越过未拾取目标）
-   * @param {number} size 迷宫边长
-   * @param {Object} [opts] { maxSkip:number } 最多向前跳过多少个路径点寻找回归点（默认 20）
-   */
-  function spliceDetour(maze, result, plan, targetSet, size, opts) {
-    var entry = plan.entry;
-    var entryCell = result[entry];
-    if (!entryCell) return result;
-    var maxSkip = (opts && typeof opts.maxSkip === 'number') ? opts.maxSkip : 20;
-
-    var distMap = bfsDistMap(maze, plan.x, plan.y);
-    if (distMap[entryCell.y * size + entryCell.x] < 0) return result; // 不可达
-
-    // 在路径前方寻找"回归点"：
-    // 代价 = 目标到回归点的真实距离 + 跳过路径点数的折半惩罚，
-    // 兼顾"离目标近"和"少跳路"。
-    // （原公式 distMap[j] - j 只偏向"离目标远"，容易绕出大回环）
-    var bestJ = entry;
-    var bestVal = distMap[entryCell.y * size + entryCell.x];
-    var scanEnd = Math.min(result.length - 1, entry + maxSkip);
-    for (var j = entry + 1; j <= scanEnd; j++) {
-      // 被跳过的路段（entry+1 .. j-1）中若有未拾取目标 → 不能越过
-      if (j >= entry + 2) {
-        var prev = result[j - 1];
-        if (targetSet[prev.y * size + prev.x]) break;
-      }
-      var dm = distMap[result[j].y * size + result[j].x];
-      if (dm < 0) continue;
-      var val = dm + (j - entry) * 0.5;
-      if (val < bestVal - 1e-9) { bestVal = val; bestJ = j; }
-    }
-
-    var leg1 = aStar(maze, entryCell, { x: plan.x, y: plan.y });
-    var leg2 = aStar(maze, { x: plan.x, y: plan.y }, result[bestJ]);
-    if (!leg1 || !leg2) return result;
-
-    var segment = leg1.concat(leg2.slice(1));
-    return result.slice(0, entry).concat(segment, result.slice(bestJ + 1));
   }
 
   /**
@@ -616,8 +497,6 @@
     isWalkable: isWalkable,
     nearestWalkable: nearestWalkable,
     bfsDistMap: bfsDistMap,
-    buildCollectPath: buildCollectPath,
-    findCollectTargets: findCollectTargets,
     buildGreedyCollectPath: buildGreedyCollectPath
   };
 

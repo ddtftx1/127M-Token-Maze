@@ -12,7 +12,6 @@
 
   var ctx = null;         // AudioContext
   var masterGain = null;  // 总音量节点
-  var unlocked = false;   // 是否已解锁
   var lastStepTimeMap = {}; // 脚步节流（按来源区分：player / ghost / …）
   var Settings = null;    // 设置引用（延迟获取）
 
@@ -25,7 +24,9 @@
       if (!AC) return null;
       ctx = new AC();
       masterGain = ctx.createGain();
-      masterGain.gain.value = currentVolume();
+      var v0 = currentVolume();
+      if (!isFinite(v0)) v0 = 0.6;          // 音量被写成 NaN 时不能让 gain 变 NaN（会抛错并废掉本次会话音频）
+      masterGain.gain.value = v0;
       masterGain.connect(ctx.destination);
     } catch (e) {
       console.warn('[audio] AudioContext 创建失败', e);
@@ -54,6 +55,15 @@
     }
   }
 
+  /** 挂起时的一次性解锁节流：1 秒内最多尝试一次，避免每个音效都 resume 一次 */
+  var unlockAt = 0;
+  function ensureUnlockSoon() {
+    var now = Date.now();
+    if (now - unlockAt < 1000) return;
+    unlockAt = now;
+    unlock();
+  }
+
   /** 浏览器自动播放策略：需在用户手势中调用 */
   function unlock() {
     var c = ensureContext();
@@ -61,17 +71,17 @@
     if (c.state === 'suspended') {
       try {
         var p = c.resume();
-        if (p && p.then) p.then(function () { unlocked = true; }).catch(function () {});
+        if (p && p.then) p.catch(function () {});
       } catch (e) { /* 忽略 */ }
-    } else {
-      unlocked = true;
     }
   }
 
   /**
-   * 首次用户手势自动解锁（一次性监听，多个事件都挂上，命中任意一个即可）
+   * 首次用户手势自动解锁：四个事件都挂上，命中任意一个即可。
    * - 部分浏览器要求 resume 必须在手势调用栈内，故在真实事件里再试一次
-   * - 只注册一次，不会重复创建 AudioContext
+   * - 只注册一次（靠 unlockBound 守卫防重复绑定）；注意 { once: true } 是 Chrome 55+
+   *   才支持的语义，Chrome 49 会把它当成 useCapture 用、监听器不会自动移除，
+   *   所以这里不依赖 once —— unlock() 本身是幂等的，重复触发无副作用
    */
   var unlockBound = false;
   function bindAutoUnlock() {
@@ -92,14 +102,15 @@
    * @param {Object} opt {freq, freq2, type, dur, vol, attack, decay, delay}
    */
   function tone(opt) {
+    // 先判静音再建上下文：静音时连锁都不该开（否则隐私模式/静音场景白建 AudioContext）
+    if (currentVolume() <= 0) return;
     var c = ensureContext();
-    if (!c || currentVolume() <= 0) return;
-    // 上下文被浏览器挂起时兜底唤醒（不阻塞本次播放，唤醒后后续音效即可发声）
+    if (!c) return;
+    // 上下文挂起（自动播放策略未解锁）：直接放弃本次发音。
+    // 原实现每个音都 resume() 一次并把振荡器排进未运行的上下文，解锁瞬间会齐发/爆音。
     if (c.state === 'suspended') {
-      try {
-        var rp = c.resume();
-        if (rp && rp.catch) rp.catch(function () {});
-      } catch (e) { /* 忽略 */ }
+      ensureUnlockSoon();
+      return;
     }
     var t0 = c.currentTime + (opt.delay || 0);
     var dur = opt.dur || 0.12;
@@ -127,14 +138,13 @@
 
   /** 白噪声（用于脚步/粒子感） */
   function noise(opt) {
+    if (currentVolume() <= 0) return;
     var c = ensureContext();
-    if (!c || currentVolume() <= 0) return;
-    // 上下文被挂起时兜底唤醒（不阻塞本次播放）
+    if (!c) return;
+    // 同 tone()：挂起时放弃本次噪声，交给统一的解锁流程（不排队，避免解锁后齐发）
     if (c.state === 'suspended') {
-      try {
-        var rp = c.resume();
-        if (rp && rp.catch) rp.catch(function () {});
-      } catch (e) { /* 忽略 */ }
+      ensureUnlockSoon();
+      return;
     }
     opt = opt || {};
     var dur = opt.dur || 0.08;
@@ -231,7 +241,10 @@
 
     /** 传送门环境低鸣（可循环调用，用于接近终点时） */
     portal: function (intensity) {
-      var v = Math.max(0.02, Math.min(0.14, intensity * 0.14));
+      // 不传参时 intensity 是 undefined，undefined * 0.14 = NaN；
+      // Web Audio 对 NaN 参数会抛 TypeError（gamma/指数曲线），表现就是"点了没声音"
+      var k = (typeof intensity === 'number' && isFinite(intensity)) ? intensity : 1;
+      var v = Math.max(0.02, Math.min(0.14, k * 0.14));
       tone({ freq: 180, freq2: 240, type: 'sine', dur: 0.9, vol: v });
     }
   };

@@ -40,7 +40,7 @@
 
       <!-- 列容器：默认 display: block（单列纵向，布局不变），仅手机横屏改为两列 -->
       <div class="menu-grid">
-        <div class="menu-col">
+        <div class="menu-col" id="menu-col-diff">
           <!-- 难度选择 -->
           <div class="section-label">选择难度</div>
           <div class="diff-list" id="diff-list">
@@ -80,6 +80,12 @@
           </div>
           <button id="btn-ranking-menu" class="mini-btn wide"><span class="svg-icon" data-icon="trophy"></span> 本地排行榜</button>
           <button id="btn-shop" class="mini-btn wide"><span class="svg-icon" data-icon="shop"></span> 商店</button>
+          <!-- 每日签到：竖屏保持在「商店」与「成就」之间；横屏由 js/checkin.js 搬到左列难度卡下方 -->
+          <button id="btn-checkin" class="mini-btn wide sign-entry">
+            <span class="svg-icon" id="checkin-entry-icon" data-icon="alarm"></span>
+            <span id="checkin-entry-label">每日签到</span>
+            <span id="checkin-dot" class="sign-dot hidden"></span>
+          </button>
           <button id="btn-achievements-menu" class="mini-btn wide"><span class="svg-icon" data-icon="trophy"></span> 成就</button>
         </div>
       </div>
@@ -325,6 +331,46 @@
     </div>
   </div>
 
+  <!-- ================= 每日签到 ================= -->
+  <div id="checkin-screen" class="screen hidden">
+    <div class="panel sign-panel">
+      <h2 class="panel-title"><span class="svg-icon" data-icon="alarm"></span> 每日签到</h2>
+      <div class="sign-stats">
+        <span>已连签 <b id="checkin-streak">0</b> 天</span>
+        <span>累计 <b id="checkin-total">0</b> 天</span>
+        <span>最长 <b id="checkin-best">0</b> 天</span>
+      </div>
+      <div id="checkin-shield" class="sign-shield"></div>
+      <div id="checkin-grid" class="sign-grid"></div>
+      <div id="checkin-reward" class="sign-reward">今日奖励：—</div>
+      <div class="sign-actions">
+        <button id="btn-checkin-claim" class="primary-btn sign-claim-btn">领取今日奖励</button>
+        <button id="btn-checkin-close" class="secondary-btn">关闭</button>
+      </div>
+      <div id="checkin-countdown" class="sign-countdown"></div>
+      <div id="checkin-hint" class="muted sign-hint"></div>
+    </div>
+  </div>
+
+  <!-- ================= 开发者选项（隐藏入口：长按商店 → 两题验证） ================= -->
+  <div id="dev-screen" class="screen hidden">
+    <div class="panel dev-panel">
+      <h2 class="panel-title"><span class="svg-icon" data-icon="shush"></span> 开发者选项</h2>
+      <div id="dev-tabs" class="dev-tabs"></div>
+      <div id="dev-body" class="dev-body"></div>
+      <!-- 剪贴板被禁用时的兜底输出（平时隐藏） -->
+      <textarea id="dev-clip" class="dev-textarea" style="display:none"></textarea>
+      <div class="dev-footer">
+        <span id="dev-status" class="dev-status"></span>
+        <div class="dev-footer-btns">
+          <button id="btn-dev-sound" class="mini-btn">恢复面板声音</button>
+          <button id="btn-dev-info" class="mini-btn">复制环境报告</button>
+          <button id="btn-dev-close" class="secondary-btn">退出</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- ================= 道具面板 ================= -->
   <div id="item-panel" class="screen hidden">
     <div class="panel panel-narrow item-panel">
@@ -360,9 +406,9 @@
   <!-- ================= 隐藏彩蛋（长按商店按钮触发） ================= -->
   <div id="secret-modal" class="screen hidden">
     <div class="panel panel-narrow secret-panel">
-      <h2 class="panel-title"><span class="svg-icon" data-icon="shush"></span> 隐藏彩蛋</h2>
-      <p class="secret-question">本游戏的AI制作者是谁？</p>
-      <p class="muted secret-note">答对奖励 99,999 金币 · 答案区分大小写</p>
+      <h2 class="panel-title"><span class="svg-icon" data-icon="shush"></span> 开发者验证</h2>
+      <p id="secret-question" class="secret-question">这个项目的 AI 制作者是谁？</p>
+      <p id="secret-note" class="muted secret-note">第 1 / 2 题</p>
       <input id="secret-input" class="text-input secret-input" type="text" placeholder="输入答案…"
              maxlength="32" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" />
       <div class="btn-row">
@@ -397,6 +443,8 @@
 <script src="js/shop.js"></script>
 <script src="js/replay.js"></script>
 <script src="js/ui.js"></script>
+<script src="js/checkin.js"></script>
+<script src="js/dev.js"></script>
 <script src="js/main.js"></script>
 </body>
 </html>

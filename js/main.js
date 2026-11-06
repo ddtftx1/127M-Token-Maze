@@ -19,7 +19,7 @@
    * 游戏全局对象
    * ---------------------------------------------------------- */
   var Game = {
-    state: 'menu',        // menu | loading | playing | paused | win
+    state: 'menu',        // menu | loading | playing | paused | win | replay
     renderer: null,
     scene: null,
     camera: null,
@@ -56,11 +56,19 @@
     _startPending: false,
     _achieveToastTimer: null, // 通关后延迟弹出成就提示的定时器（离开本局时清理）
     _pendingAchieveToast: null, // 待播报的成就名（定时器被取消时由 backToMenu / buildLevel 补发）
-    _renderStopped: false // 渲染致命错误后停止循环
+    _renderStopped: false, // 渲染致命错误后停止循环
+    _ctxLost: false       // WebGL 上下文是否已丢失（恢复流程见 bindContextLoss / handleContextLost）
   };
 
   /** 暴露给 player.js 使用（路径可视化需要 scene） */
   MG.game = Game;
+
+  /**
+   * 回放"跟随视角"复用的射线检测器。
+   * 原实现每帧 new THREE.Raycaster，回放期间会持续产生可回收对象（GC 抖动），
+   * 这里只保留一个实例，每帧用 set() 换射线、重置 near/far（BUG-027）。
+   */
+  var replayRaycaster = null;
 
   /* ------------------------------------------------------------
    * 渲染器 / 场景 / 灯光 初始化
@@ -68,10 +76,6 @@
   function initThree() {
     var canvas = MG.UI.el['game-canvas'];
     var settings = MG.Settings.get();
-
-    // 像素比：移动端限制，避免过热掉帧
-    var maxDPR = settings.quality === 'high' ? 2 : (settings.quality === 'low' ? 1 : 1.5);
-    var dpr = Math.min(window.devicePixelRatio || 1, maxDPR);
 
     var renderer;
     try {
@@ -87,14 +91,9 @@
       return false;
     }
 
-    renderer.setPixelRatio(dpr);
-    renderer.setSize(window.innerWidth, window.innerHeight, false);
-    renderer.shadowMap.enabled = !!settings.shadows;
-    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-    // 颜色/色调映射：让暗部细节更自然
-    if ('outputColorSpace' in renderer) renderer.outputColorSpace = THREE.SRGBColorSpace;
-    renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.05;
+    setupRenderer(renderer, settings);
+    // WebGL 上下文丢失 / 恢复：切后台被系统回收、GPU 进程重启等场景的兜底（BUG-029）
+    bindContextLoss(canvas);
 
     var scene = new THREE.Scene();
     scene.background = new THREE.Color(MG.Maze.THEMES[settings.theme].sky);
@@ -122,6 +121,249 @@
     });
 
     return true;
+  }
+
+  /** 套用渲染器设置（初始化、上下文恢复、换画布重建三处共用，避免逻辑漂移） */
+  function setupRenderer(renderer, settings) {
+    // 像素比：移动端限制，避免过热掉帧
+    var maxDPR = settings.quality === 'high' ? 2 : (settings.quality === 'low' ? 1 : 1.5);
+    var dpr = Math.min(window.devicePixelRatio || 1, maxDPR);
+    renderer.setPixelRatio(dpr);
+    renderer.setSize(window.innerWidth, window.innerHeight, false);
+    renderer.shadowMap.enabled = !!settings.shadows;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    // 颜色/色调映射：让暗部细节更自然
+    if ('outputColorSpace' in renderer) renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.05;
+  }
+
+  /* ------------------------------------------------------------
+   * WebGL 上下文丢失 / 恢复（BUG-029）
+   * ------------------------------------------------------------
+   * 现象：切到后台放一段时间再回来，点「继续游戏」后 3D 画面永久白屏，但游戏逻辑照跑
+   * （能靠小地图盲走、GUI 完全正常、重开本局或回主菜单都救不回来）。
+   *
+   * 原因：系统回收了 WebGL 上下文（安卓后台内存紧张时常见）。渲染器一旦丢了上下文，
+   * three.js 会跳过 render（不抛错，所以不会走到 fatal 那套），而本模块此前没有任何
+   * 感知：既不暂停、也不提示、也没有兜底 —— 浏览器如果始终不派发 restored，
+   * 画布就永远是空的，玩家只能看着"加载失败的方块"干瞪眼。
+   *
+   * 四段兜底（①丢失 / ②恢复 / ③催一次+重建 / ④给出口）：
+   *   ① 丢失瞬间：preventDefault（允许恢复）+ 暂停游戏（禁止盲走）+ 显示恢复中提示；
+   *   ② 收到 restored：重新套用渲染器设置并强制渲染一帧；
+   *   ③ 等不到 restored：主动 restoreContext() 催一次；仍不行就换一张画布 + 新渲染器 ——
+   *      场景 / 摄像机 / 迷宫 / 玩家位置都在内存里且与渲染器无关，复用即可，本局进度不丢；
+   *   ④ 重建也失败：给明确的「重新加载页面」出口，不再白屏无提示。
+   * ---------------------------------------------------------- */
+  var ctxTimers = [];
+
+  function clearCtxTimers() {
+    for (var i = 0; i < ctxTimers.length; i++) clearTimeout(ctxTimers[i]);
+    ctxTimers = [];
+  }
+
+  /** 当前 WebGL 上下文是否已丢失 */
+  function isContextLostNow() {
+    try {
+      var gl = Game.renderer && Game.renderer.getContext && Game.renderer.getContext();
+      return !!(gl && gl.isContextLost && gl.isContextLost());
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /** 给画布挂上下文事件（初始化一次；重建画布后要对新画布再挂一次） */
+  function bindContextLoss(canvas) {
+    if (!canvas || !canvas.addEventListener) return;
+    canvas.addEventListener('webglcontextlost', function (e) {
+      // 必须 preventDefault，浏览器才会尝试恢复（three.js 内部也做了，这里显式保证）
+      if (e && e.preventDefault) e.preventDefault();
+      // 旧画布被换掉后仍可能派发迟到事件：只认当前画布，别让它干扰健康的新上下文
+      if (canvas !== MG.UI.el['game-canvas']) return;
+      handleContextLost();
+    }, false);
+    canvas.addEventListener('webglcontextrestored', function () {
+      if (canvas !== MG.UI.el['game-canvas']) return;
+      handleContextRestored();
+    }, false);
+  }
+
+  /** 上下文丢失：暂停 + 提示 + 安排恢复尝试 */
+  function handleContextLost() {
+    if (Game._ctxLost) return;
+    Game._ctxLost = true;
+    // 恢复期挂起逐帧逻辑（loopBody 首行判断）：loading 期丢失时 buildLevel 仍会把 state
+    // 置 playing，只靠暂停拦不住键盘盲走
+    Game._ctxRecovering = true;
+    console.warn('[game] WebGL 上下文丢失，暂停游戏并尝试恢复');
+    // 画都画不出来的时候不能让玩家接着盲走
+    if (Game.state === 'playing') pauseGame();
+    else if (Game.state === 'replay') {
+      // 只在"正在播放"时暂停：toggleReplayPause 对"已播完"的回放会重新开播
+      if (Game.replayPlaying) toggleReplayPause();
+    }
+    showContextOverlay('lost');
+    clearCtxTimers();
+    ctxTimers.push(setTimeout(nudgeContextRestore, 1200));
+    ctxTimers.push(setTimeout(recreateRenderer, 3500));
+  }
+
+  /** 主动请求浏览器恢复上下文（部分内核对"后台期间被回收"的上下文不会自动触发 restored） */
+  function nudgeContextRestore() {
+    if (!Game._ctxLost) return;
+    try {
+      var gl = Game.renderer && Game.renderer.getContext && Game.renderer.getContext();
+      var ext = gl && gl.getExtension && gl.getExtension('WEBGL_lose_context');
+      if (ext && ext.restoreContext) ext.restoreContext();
+    } catch (e) { /* 不支持就交给后面的重建兜底 */ }
+  }
+
+  /** 上下文恢复：重新套用渲染器设置并强制渲染一帧 */
+  function handleContextRestored() {
+    if (!Game._ctxLost) return;
+    console.info('[game] WebGL 上下文已恢复');
+    clearCtxTimers();
+    Game._ctxLost = false;
+    Game._ctxRecovering = false;
+    try {
+      setupRenderer(Game.renderer, MG.Settings.get());
+      if (Game.scene && Game.camera) Game.renderer.render(Game.scene, Game.camera);
+    } catch (e) {
+      console.error('[game] 上下文恢复后重绘失败，改为重建渲染器', e);
+      Game._ctxLost = true;
+      recreateRenderer();
+      return;
+    }
+    hideContextOverlay();
+    if (MG.UI && MG.UI.toast) MG.UI.toast('画面已恢复', 1600);
+  }
+
+  /** 旧渲染器的阴影贴图属于已废弃的上下文：清空让新渲染器重新分配 */
+  function resetShadowMaps() {
+    if (!Game.scene) return;
+    Game.scene.traverse(function (obj) {
+      if (obj && obj.isLight && obj.shadow && obj.shadow.map) obj.shadow.map = null;
+    });
+  }
+
+  /**
+   * 彻底重建渲染器：换一张新画布 + 新 WebGLRenderer。
+   * 场景 / 摄像机 / 迷宫 / 玩家位置都在内存里且与渲染器无关，复用即可保住本局进度。
+   */
+  function recreateRenderer() {
+    clearCtxTimers();
+    if (!Game._ctxLost) return;                          // 期间已经被浏览器恢复了
+    if (Game._renderStopped) {                           // 已经 fatal：不要再用 toast 覆盖错误界面
+      Game._ctxLost = false;
+      Game._ctxRecovering = false;
+      hideContextOverlay();
+      return;
+    }
+    // 有些内核只恢复上下文、不派发 webglcontextrestored：这种情况不需要换画布，
+    // 否则会无谓重建渲染器、dispose 旧对象、还弹一条误导性的"画面已恢复"
+    if (!isContextLostNow()) {
+      Game._ctxLost = false;
+      Game._ctxRecovering = false;
+      hideContextOverlay();
+      forceRedraw();
+      return;
+    }
+    if (!Game.scene || !Game.camera) { showContextOverlay('dead'); return; }
+    var oldCanvas = MG.UI.el['game-canvas'];
+    var parent = oldCanvas && oldCanvas.parentNode;
+    if (!parent) { showContextOverlay('dead'); return; }
+
+    var settings = MG.Settings.get();
+    var newCanvas = document.createElement('canvas');
+    newCanvas.id = 'game-canvas';
+    var renderer = null;
+    try {
+      renderer = new THREE.WebGLRenderer({
+        canvas: newCanvas,
+        antialias: settings.quality === 'high',
+        powerPreference: 'high-performance',
+        alpha: false,
+        stencil: false
+      });
+      setupRenderer(renderer, settings);
+    } catch (e) {
+      console.error('[game] 重建渲染器失败', e);
+      renderer = null;
+    }
+    if (!renderer) { showContextOverlay('dead'); return; }
+
+    // 先让新画布就位再移除旧画布，避免中间出现空档
+    try { parent.replaceChild(newCanvas, oldCanvas); } catch (e) { parent.appendChild(newCanvas); }
+    MG.UI.el['game-canvas'] = newCanvas;
+    if (Game.input) Game.input.canvas = newCanvas;   // Pointer Lock 要打到新画布上
+    if (Game.player) Game.player.canvas = newCanvas;
+
+    var oldRenderer = Game.renderer;
+    Game.renderer = renderer;
+    if (oldRenderer && oldRenderer.dispose) {
+      try { oldRenderer.dispose(); } catch (e) { /* 旧上下文已废弃，释放失败无所谓 */ }
+    }
+
+    resetShadowMaps();
+    bindContextLoss(newCanvas);
+    Game._ctxLost = false;
+    Game._ctxRecovering = false;
+    // 注：_renderStopped 一旦置 true 不会复位（loop 已停）；这里只复位"渲染异常已提示"标记
+    Game._renderErrLogged = false;
+    try {
+      renderer.render(Game.scene, Game.camera);
+    } catch (e) {
+      console.error('[game] 重建后首帧渲染失败', e);
+      showContextOverlay('dead');
+      return;
+    }
+    hideContextOverlay();
+    if (MG.UI && MG.UI.toast) MG.UI.toast('画面已恢复（本局进度保留）', 2200);
+  }
+
+  /** 上下文提示层：既用于"恢复中"，也用于"救不回来"的兜底出口（沿用现有 .screen/.panel 样式） */
+  function showContextOverlay(mode) {
+    var app = MG.UI.el['app'];
+    if (!app) return;
+    var node = document.getElementById('ctx-overlay');
+    if (!node) {
+      node = document.createElement('div');
+      node.id = 'ctx-overlay';
+      node.className = 'screen';
+      node.style.zIndex = '98';   // 高于暂停菜单（40）与 toast（60），低于 fatal（99）
+      app.appendChild(node);
+    }
+    var dead = (mode === 'dead');
+    node.innerHTML =
+      '<div class="panel panel-narrow" style="text-align:center">' +
+      '<h2 class="panel-title">' + (dead ? '画面无法恢复' : '正在恢复画面…') + '</h2>' +
+      '<p class="muted" style="line-height:1.7">' +
+      '系统回收了本页的图形上下文（切到后台后内存紧张时常见）。' +
+      (dead
+        ? '自动恢复已失败，请点击下方按钮重新加载页面；本局进度会丢失，重载后从主菜单重新开始。'
+        : '正在尝试自动恢复，场景与本局进度都还在，请稍候；若长时间无响应，可手动重新加载。') +
+      '</p>' +
+      '<div class="btn-row"><button class="primary-btn" id="ctx-reload">重新加载页面</button></div>' +
+      '</div>';
+    var btn = document.getElementById('ctx-reload');
+    if (btn) btn.addEventListener('click', function () { location.reload(); });
+  }
+
+  function hideContextOverlay() {
+    var node = document.getElementById('ctx-overlay');
+    if (node && node.parentNode) node.parentNode.removeChild(node);
+  }
+
+  /** 回到前台强制重绘一帧：部分内核对"后台回来"的画布不再合成（白屏但逻辑正常） */
+  function forceRedraw() {
+    if (!Game.renderer || !Game.scene || !Game.camera) return;
+    try {
+      setupRenderer(Game.renderer, MG.Settings.get());
+      Game.renderer.render(Game.scene, Game.camera);
+    } catch (e) {
+      console.warn('[game] 回到前台重绘失败', e);
+    }
   }
 
   /** 灯光 */
@@ -208,9 +450,35 @@
     Game._startPending = false;
   }
 
+  /**
+   * 开局入口：守卫 + 难度校验 + 同步异常兜底。
+   * 真正的流程在 startGameInner()（原函数主体）。拆开的原因：_startPending 一旦置 true
+   * 却因同步异常没机会释放，之后所有「开始游戏」都会被静默吞掉，只能刷新页面。
+   */
   function startGame(diffKey, seed, isDaily) {
-    if (Game._startPending) return;
+    if (Game._startPending) {
+      // 静默 return 会让玩家以为"点了没反应"，这里给一次轻提示
+      if (MG.UI && MG.UI.toast) MG.UI.toast('正在加载，请稍候', 1200);
+      return;
+    }
+    // 难度 key 非法时直接拦住：否则 Game.diff 变 undefined，buildLevel 里 diff.cells 抛错 → fatal
+    if (!MG.Maze.DIFFICULTIES[diffKey]) {
+      console.error('[game] 未知难度：' + diffKey);
+      if (MG.UI && MG.UI.toast) MG.UI.toast('难度参数不正确');
+      return;
+    }
     Game._startPending = true;
+    try {
+      startGameInner(diffKey, seed, isDaily);
+    } catch (e) {
+      console.error('[game] 开始游戏失败', e);
+      releaseStartPending();
+      if (MG.UI && MG.UI.showMainMenu) MG.UI.showMainMenu();
+      fatal('开始游戏失败', String((e && e.message) || e));
+    }
+  }
+
+  function startGameInner(diffKey, seed, isDaily) {
     // 清掉上一局残留的道具面板状态：R 键重开等路径不经过 closeItemPanel / backToMenu，
     // 若不清零会让 pauseGame 的 itemPanelOpen 守卫永久拦截 HUD 暂停 / 设置按钮
     Game.itemPanelOpen = false;
@@ -229,7 +497,8 @@
 
     /** 进入加载流程（useGhost 为 true 且存在回放时才启用幽灵） */
     function proceed(useGhost) {
-      // 重新置位：进入加载流程后，重复点"开始游戏"仍会被守卫拦下（防止连点双开）
+      // 重新置位：从这里到"弹窗已决定"之间保持守卫；进入加载后由 loading 屏挡住重复点击，
+      // finally 会在 proceed 返回后立即释放守卫（见下方 then/finally）
       Game._startPending = true;
       if (useGhost && hasGhost) Game._pendingGhost = ghostFrames;
       MG.UI.showLoading('准备生成迷宫…', 0.05);
@@ -291,6 +560,19 @@
     var settings = MG.Settings.get();
     var diff = Game.diff;
 
+    // 沙盒测试局（js/dev.js）：换一份"无金币 / 无天花板"的难度副本。
+    // 逐项判方法存在：旧副本 / 半截 dev.js（副本漂移）缺一个方法就会抛 TypeError，
+    // 被 startGame 的 catch 变成 fatal，整局不可玩
+    var isSandbox = !!(MG.Dev &&
+      ((typeof MG.Dev.takeSandboxFlag === 'function' && MG.Dev.takeSandboxFlag()) ||
+       (typeof MG.Dev.isSandbox === 'function' && MG.Dev.isSandbox())));
+    if (isSandbox) {
+      diff = MG.Dev.patchDiff(diff);
+      // HUD 与胜利结算读的都是 Game.diff（onVictory / updateHudData），
+      // 只替换局部变量会让沙盒局按原难度结算、显示成"困难"（BUG-025）
+      Game.diff = diff;
+    }
+
     MG.UI.setLoadingProgress(0.2, '生成迷宫结构…');
 
     // 1) 生成迷宫数据
@@ -303,6 +585,10 @@
     var ep = MG.Maze.pickEndpoints(maze, diff.farCell);
     maze.start = ep.start;
     maze.end = ep.end;
+
+    // 2.5) 沙盒：放在 pickEndpoints 之后 —— 它会重设 start/end，先设就白设了。
+    //      打通整张网格后得到"只有地面"的空场（墙体一个都不会生成，边界即隐形墙）
+    if (isSandbox) MG.Dev.prepareMaze(maze);
 
     // 3) 确保终点可达（极端情况下通过 BFS 校验）
     var reachable = MG.Path.bfs(maze, maze.start, maze.end);
@@ -329,6 +615,8 @@
 
     // 6) 玩家（相机位于起点）
     Game.player = new MG.Player(Game.camera, maze, diff, MG.UI.el['game-canvas']);
+    // 沙盒收尾（隐藏传送门 / 光点 / 粒子 / 卷轴 + 按开关自动解锁小地图）放在 7.1 之后：
+    // 它会置 mapFound=true 并解锁小地图，若在这里调用，会被后面"mapFound=false + 重新上锁"覆盖
     Game.player.onAutoFinish = function () {
       var p = Game.player;
       if (p && p.autoStoppedByLimit) {
@@ -380,6 +668,10 @@
       Game.mapHint = '提示：地图在' + mdir + '侧';
     }
     MG.UI.updateMinimapLock(true, Game.mapHint);
+
+    // 7.1.1) 沙盒收尾放在这里：afterBuild 会按开关自动解锁小地图，
+    //        必须晚于上面的 mapFound=false 与重新上锁，否则开关等于无效
+    if (isSandbox && MG.Dev && typeof MG.Dev.afterBuild === 'function') MG.Dev.afterBuild();
 
     // 7.2) 回放记录器：记录本局路径（每 100ms 一帧）
     if (MG.Replay) Game.recorder = MG.Replay.createRecorder();
@@ -689,6 +981,12 @@
    * @param {string} itemId 'mapUnlock' | 'bestPath' | 'fastPath'
    */
   function useItem(itemId) {
+    // 沙盒生成器等开发者专用道具入口（id 形如 dev:spawnCoin）
+    if (itemId && itemId.indexOf('dev:') === 0) {
+      if (MG.Dev && MG.Dev.handleItemUse) MG.Dev.handleItemUse(itemId);
+      return;
+    }
+
     if (!MG.Shop) return;
     var player = Game.player;
 
@@ -720,11 +1018,17 @@
         MG.UI.toast('正在自动寻路中');
         return;
       }
+      // 顺序按用户拍板保留："先启动寻路、再扣道具" —— 宁可先跑起来再扣费，
+      // 也不接受"扣了没启动"这种玩家吃亏的方向；扣费失败时在这里完整回滚。
+      var wasAuto = Game.usedAutoPath;
       var ok = triggerAutoPath(kind);
       if (!ok) return;
       if (!MG.Shop.consumeItem(itemId)) {
         // 异常兜底：扣费失败则取消寻路，避免白嫖
         if (player) player.cancelAutoPath();
+        // 关键：triggerAutoPath 内部会置 usedAutoPath=true，扣费失败必须回滚，
+        // 否则玩家没用掉道具却被记成"用过自动寻路"，「自力更生」成就从此拿不到
+        Game.usedAutoPath = wasAuto;
         MG.UI.toast('道具不足');
         if (MG.Audio) MG.Audio.error();
         return;
@@ -756,6 +1060,12 @@
   function resumeGame() {
     if (Game.state !== 'paused') return;
     if (Game.itemPanelOpen) return; // 道具面板打开期间不恢复
+    // 画面已丢失（切后台被系统回收）：不要进入"看得见 HUD、看不见场景"的盲走状态，
+    // 先走上下文恢复流程；恢复成功后玩家再点一次继续即可（BUG-029）
+    if (isContextLostNow()) {
+      handleContextLost();
+      return;
+    }
     MG.UI.hidePause();
     // 兜底：任何恢复路径都必须让 HUD 可见（避免经设置面板返回后 HUD 丢失）
     MG.UI.show('hud');
@@ -769,6 +1079,10 @@
   function restartGame() {
     clearAchieveToastTimer();
     MG.UI.hidePause();
+    // 退出指针锁定：否则光标隐藏，若本局存在回放会弹幽灵询问框，玩家点不到按钮（只能 ESC / 等 15s）
+    if (Game.input && Game.input.exitPointerLock) Game.input.exitPointerLock();
+    // 把状态从 playing 移开：否则幽灵询问弹窗显示期间旧局仍在背后推进（计时 / 按键 / 终点判定）
+    if (Game.state === 'playing' || Game.state === 'paused') Game.state = 'menu';
     // 用同一难度与种子重新生成（同一迷宫再挑战）
     startGame(Game.diffKey, Game.seed, Game.isDaily);
   }
@@ -804,6 +1118,10 @@
     MG.UI.showMainMenu();
     MG.UI.refreshRecords();
     MG.UI.refreshAchievements();
+    // 签到入口的角标/文案（跨天或刚领取后回到菜单时保持一致）
+    if (MG.Checkin && typeof MG.Checkin.refreshBadge === 'function') MG.Checkin.refreshBadge();
+    // 沙盒测试局结束：复位标记，避免下一次正常开局还按沙盒处理
+    if (MG.Dev && MG.Dev.resetSandbox) MG.Dev.resetSandbox();
   }
 
   /* ------------------------------------------------------------
@@ -818,21 +1136,27 @@
     if (player) player.cancelAutoPath();
     if (Game.input) Game.input.exitPointerLock();
 
+    // 沙盒测试局：不写任何"正式存档"（钱包 / 记录 / 排行榜 / 回放 / 成就），避免测试数据污染玩家档案。
+    // 必须先算：原先金币 addCoins 写在守卫之前，沙盒里捡的金币会真的进钱包
+    var isSandboxWin = !!(MG.Dev && MG.Dev.isSandbox && MG.Dev.isSandbox());
+
     // 金币汇入钱包：× 收益倍率结算，但保证不低于原始拾取数
     // （避免小数被向下取整后，玩家买了 +25% 加成却感知不到，例如 3×1.25=3.75 → 3）
     var coinsEarned = 0;
-    if (MG.Shop) {
+    if (!isSandboxWin && MG.Shop) {
       var rawEarn = Game.collectedCoins * MG.Shop.coinMultiplier();
       coinsEarned = Math.max(Game.collectedCoins, Math.round(rawEarn));
       if (coinsEarned > 0) MG.Shop.addCoins(coinsEarned);
     }
 
     // 提交记录
-    var res = MG.Settings.submitRecord(diff.key, Game.elapsed, player ? player.steps : 0);
+    var res = isSandboxWin
+      ? { isBest: false, best: null, all: null }
+      : MG.Settings.submitRecord(diff.key, Game.elapsed, player ? player.steps : 0);
 
     // 提交本地排行榜（按难度分区，仅保留前 10 名）
     var rankRes = { rank: 0 };
-    if (MG.Ranking) {
+    if (!isSandboxWin && MG.Ranking) {
       rankRes = MG.Ranking.add(diff.key, {
         time: Game.elapsed,
         steps: player ? player.steps : 0,
@@ -844,7 +1168,7 @@
 
     // 保存本局回放数据（按难度+种子为 key，供回放 / 幽灵使用）
     var hasReplay = false;
-    if (MG.Replay && Game.recorder && player) {
+    if (!isSandboxWin && MG.Replay && Game.recorder && player) {
       var recFrames = Game.recorder.finish(player.pos.x, player.pos.z, player.yaw);
       hasReplay = MG.Replay.save(diff.key, Game.seed, recFrames, {
         time: Game.elapsed,
@@ -853,8 +1177,9 @@
       });
     }
 
-    // 成就判定
+    // 成就判定（沙盒局跳过）
     var newAchievements = [];
+    if (!isSandboxWin) {
     if (MG.Settings.unlockAchievement('first_win')) newAchievements.push('初次通关');
     if (!Game.usedAutoPath && MG.Settings.unlockAchievement('no_autopath')) newAchievements.push('自力更生');
     if (diff.key === 'hard' && MG.Settings.unlockAchievement('hard_win')) newAchievements.push('勇者无畏');
@@ -867,6 +1192,7 @@
         Game.collectedCoins >= Game.mazeView.totalCoins) {
       if (MG.Settings.unlockAchievement('collector')) newAchievements.push('收藏家');
     }
+    } // end if (!isSandboxWin)
 
     // 展示胜利界面
     MG.UI.showWin({
@@ -1026,7 +1352,12 @@
       var maxDist = toCam.length();
       toCam.normalize();
 
-      var raycaster = new THREE.Raycaster(origin, toCam, 0, maxDist);
+      // 复用同一个 Raycaster：three.js 的 set() 只写射线，near/far 需要每帧按需重置
+      if (!replayRaycaster) replayRaycaster = new THREE.Raycaster();
+      replayRaycaster.set(origin, toCam);
+      replayRaycaster.near = 0;
+      replayRaycaster.far = maxDist;
+      var raycaster = replayRaycaster;
       if (Game.mazeView && Game.mazeView.walls) {
         var hits = raycaster.intersectObject(Game.mazeView.walls);
         if (hits.length > 0) {
@@ -1051,9 +1382,28 @@
    * ---------------------------------------------------------- */
   var lastMapDraw = 0;
 
+  /**
+   * 主循环外层：只负责 rAF 调度与异常兜底；逐帧逻辑在 loopBody()。
+   * 原实现只有 renderer.render 在 try 里 —— playing 分支任何一处抛错都会每帧刷屏，
+   * 而且循环不会停、玩家停在被更新到一半的状态。
+   */
   function loop() {
     if (Game._renderStopped) return; // 渲染致命错误后停止循环（不再调度下一帧）
     requestAnimationFrame(loop);
+    try {
+      loopBody();
+    } catch (e) {
+      Game._renderStopped = true;
+      console.error('[game] 主循环异常，已停止渲染循环', e);
+      fatal('运行异常', '本局已停止，请刷新页面重试。');
+    }
+  }
+
+  function loopBody() {
+    // 上下文丢失 / 恢复期间挂起全部逐帧逻辑：loading 期丢失后 buildLevel 仍会把 state 置
+    // playing，覆盖层只挡指针事件、挡不住 window 键盘监听 → 否则玩家能在"正在恢复画面…"
+    // 下面用键盘盲走、计时照跑，与"禁止盲走"的意图相悖
+    if (Game._ctxRecovering) return;
 
     var dt = Game.clock ? Game.clock.getDelta() : 0.016;
     dt = Math.min(dt, 0.1); // 保护：限制单帧最大步进，避免切后台回来跳帧/穿墙
@@ -1160,8 +1510,8 @@
         }
       }
 
-      // 7) 终点判定
-      if (Game.player.reachedEnd()) {
+      // 7) 终点判定（沙盒空场没有终点：prepareMaze 仍会设 maze.end，走到对角会误判通关）
+      if (!(MG.Dev && MG.Dev.isSandbox && MG.Dev.isSandbox()) && Game.player.reachedEnd()) {
         onVictory();
       }
 
@@ -1272,6 +1622,14 @@
         Game.mazeView.walls.castShadow = shadowsOn;
         Game.mazeView.walls.receiveShadow = shadowsOn;
       }
+      // 地面 / 天花板是在 build() 时按当时的 shadows 设置写死 receiveShadow 的，
+      // 运行时再打开阴影就收不到影子（看起来"开了阴影但没有影子"），这里同步一次
+      if (Game.mazeView && Game.mazeView.floor) {
+        Game.mazeView.floor.receiveShadow = shadowsOn;
+      }
+      if (Game.mazeView && Game.mazeView.ceiling) {
+        Game.mazeView.ceiling.receiveShadow = shadowsOn;
+      }
       // 只标记"与阴影相关"的网格材质需要重编译（限定在迷宫组内的受光材质），
       // 避免全场景 traverse needsUpdate 触发全量着色器重编译导致卡顿
       if (Game.mazeView && Game.mazeView.group) {
@@ -1330,6 +1688,12 @@
     Game.state = 'menu';
     // 停止渲染循环：否则 WebGL 初始化失败等场景下每帧仍会尝试 render 并反复抛异常
     Game._renderStopped = true;
+    // 与上下文恢复流程互斥：3500ms 的重建定时器若照常触发，会出现
+    // "致命错误层 + 画面已恢复 toast"的矛盾提示
+    clearCtxTimers();
+    Game._ctxLost = false;
+    Game._ctxRecovering = false;
+    hideContextOverlay();
     var app = MG.UI.el['app'];
     if (!app) { alert(title + '\n' + msg); return; }
     var overlay = document.createElement('div');
@@ -1390,6 +1754,17 @@
   }
 
   function boot() {
+    // 幂等守卫：boot 通过 MG.boot 对外导出（调试用），重复调用会重复建 renderer、
+    // 重复挂 resize / visibilitychange、重复绑按钮 → 一次点击触发两次
+    if (Game._booted) return;
+    Game._booted = true;
+
+    // 0.0) 全局错误捕获放到最前面：boot 早期（设置加载 / UI 初始化 / 签到角标）抛错
+    //      也要能记录下来。原实现注册在 loop() 之后，那段代码跑不到时就什么都抓不到。
+    window.addEventListener('error', function (e) {
+      console.error('[game] 运行错误', e.message, e.filename, e.lineno);
+    });
+
     // 0) 先在 body 上落降级 class：早于任何面板渲染，避免先按现代样式画一遍再跳变
     applyLegacyClasses();
 
@@ -1423,6 +1798,8 @@
       }
     };
     Game.input.onPause = function () {
+      // 签到面板开启时：ESC / P 先关面板（与道具面板、设置面板一致的手感）
+      if (MG.Checkin && MG.Checkin.isPanelOpen && MG.Checkin.isPanelOpen()) { MG.Checkin.closePanel(); return; }
       // 道具面板开启时：ESC / P 键优先关闭面板（不弹暂停菜单、不恢复）
       if (Game.itemPanelOpen) { closeItemPanel(); return; }
       // 设置面板开启时：优先关闭它。否则 ESC 会走进下面的 resumeGame() 分支，
@@ -1492,23 +1869,35 @@
     // 恢复上次选择的难度（可选）
     MG.UI.setSeed('');
 
-    // 6) 页面可见性变化自动暂停（移动端体验）
+    // 5.1) 每日签到：缓存 DOM、摆放入口按钮、刷角标，并安排 boot 后 700ms 自动弹一次
+    //      （放在 showMainMenu 之后：入口按钮要依当前屏幕方向落到正确位置）
+    if (MG.Checkin && typeof MG.Checkin.init === 'function') MG.Checkin.init();
+
+    // 5.2) 开发者选项：挂 console/error 捕获、绑定面板事件（入口在长按商店的验证门之后）
+    if (MG.Dev) MG.Dev.init();
+
+    // 6) 页面可见性变化：切后台自动暂停；回前台主动探测上下文并强制重绘（BUG-029）
     document.addEventListener('visibilitychange', function () {
-      if (document.hidden && Game.state === 'playing') {
-        // 切到后台的瞬间就清空输入状态：此时浏览器多半不会补发 touchend，
-        // 提前清理比等恢复时再清更可靠（BUG-013 / BUG-014）
-        if (Game.input && Game.input.resetInputs) Game.input.resetInputs();
-        pauseGame();
+      if (document.hidden) {
+        if (Game.state === 'playing') {
+          // 切到后台的瞬间就清空输入状态：此时浏览器多半不会补发 touchend，
+          // 提前清理比等恢复时再清更可靠（BUG-013 / BUG-014）
+          if (Game.input && Game.input.resetInputs) Game.input.resetInputs();
+          pauseGame();
+        }
+        return;
       }
+      // 回到前台：有些内核对后台回收的上下文不派发 contextlost，但画布其实已经失效
+      if (isContextLostNow()) {
+        handleContextLost();
+        return;
+      }
+      // 正常情况也主动画一帧：修复"回到前台画布不再参与合成"导致的空白
+      forceRedraw();
     });
 
     // 7) 启动循环
     loop();
-
-    // 8) 全局错误捕获（便于排查，不影响体验）
-    window.addEventListener('error', function (e) {
-      console.error('[game] 运行错误', e.message, e.filename, e.lineno);
-    });
 
     console.info('%c3D迷宫探险 已启动', 'color:#35d0ff;font-weight:bold');
     console.info('Three.js 版本：', THREE.REVISION);

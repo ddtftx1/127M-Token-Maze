@@ -38,6 +38,10 @@
   var mapCacheExploredCount = -1;
   /** 上次重绘缓存时的静态内容签名（难度/主题/色盲/金币设置变化时失效） */
   var mapCacheSignature = '';
+  /** 窗口尺寸/横竖屏变化后是否欠一次小地图分辨率重算（容器隐藏时先挂起，绘制时补算） */
+  var minimapResizePending = false;
+  /** resize 防抖定时器 id（0 = 无待执行任务） */
+  var minimapResizeTimer = 0;
 
   /** 强制小地图缓存在下一次绘制时重绘（主题 / 色盲 / 金币设置 / 重新开局时调用） */
   function invalidateMinimapCache() {
@@ -134,6 +138,42 @@
     mapCacheSignature = '';
   }
 
+  /**
+   * 按当前 CSS 显示尺寸与 DPR 重设小地图画布分辨率（BUG-028）。
+   * init() 只在启动时算一次；窗口缩放 / 手机横竖屏切换后 .minimap-wrap 的 CSS 宽度
+   * 会变，画布内部像素尺寸不变就会被 CSS 拉伸发虚，内部逻辑坐标也会跟着错位。
+   * 容器隐藏时 clientWidth 为 0，此时不按兜底值改小，而是挂起，等下一次真正可见的
+   * 绘制再补算（drawMinimap 开头会消费这个标记）。
+   * @returns {boolean} 本次是否完成了重算
+   */
+  function resizeMinimap() {
+    if (!el['minimap'] || !mapCtx) return false;
+    var cssW = el['minimap'].clientWidth || 0;
+    if (!cssW) {
+      minimapResizePending = true;
+      return false;
+    }
+    var dpr = Math.min(window.devicePixelRatio || 1, 2);
+    var size = Math.max(1, Math.round(cssW));
+    if (size === mapSize && dpr === mapCacheDpr) {
+      minimapResizePending = false;
+      return true;
+    }
+    mapSize = size;
+    el['minimap'].width = Math.round(mapSize * dpr);
+    el['minimap'].height = Math.round(mapSize * dpr);
+    mapCtx.setTransform(dpr, 0, 0, dpr, 0, 0);   // 设置 width/height 会重置变换，必须重设
+    mapCacheDpr = dpr;
+    if (mapCacheCanvas && mapCacheCtx) {
+      mapCacheCanvas.width = Math.round(mapSize * dpr);
+      mapCacheCanvas.height = Math.round(mapSize * dpr);
+      mapCacheCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    resetMinimapCache();   // 尺寸变了：静态缓存签名 / 坐标统计全部作废
+    minimapResizePending = false;
+    return true;
+  }
+
   /** 计时器状态 */
   var clockEl = null;
 
@@ -169,6 +209,7 @@
       'item-panel', 'item-list',
       'ghost-modal', 'ghost-modal-info', 'ghost-remember', 'btn-ghost-yes', 'btn-ghost-no',
       'secret-modal', 'secret-input', 'btn-secret-ok', 'btn-secret-cancel', 'shop-title',
+      'secret-question', 'secret-note',
       'replay-bar', 'btn-replay-exit', 'btn-replay-pause', 'replay-time', 'btn-replay-view'
     ];
     for (var i = 0; i < ids.length; i++) {
@@ -195,6 +236,19 @@
       mapCacheCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
       mapCacheDirty = true;
     }
+
+    // 窗口缩放 / 手机横竖屏切换：.minimap-wrap 的 CSS 尺寸会变，画布内部分辨率要跟着
+    // 重算，否则小地图被 CSS 拉伸发虚（BUG-028）。防抖避免拖动窗口时反复重设画布。
+    var onMinimapViewportChange = function () {
+      if (minimapResizeTimer) clearTimeout(minimapResizeTimer);
+      minimapResizeTimer = setTimeout(resizeMinimap, 120);
+    };
+    window.addEventListener('resize', onMinimapViewportChange);
+    // 老 WebView 里横竖屏切换未必触发 resize，单独补一个（同一次防抖合并）
+    window.addEventListener('orientationchange', onMinimapViewportChange);
+    // 上面那一步在菜单态执行时 HUD 还隐藏着，只能拿到兜底宽度；标记一次，
+    // 等第一帧真正可见的绘制用真实 CSS 尺寸校准（也覆盖"菜单里转了屏再开局"）
+    minimapResizePending = true;
 
     clockEl = { t: 0 };
 
@@ -228,7 +282,7 @@
     if (node) node.classList.add('hidden');
   }
   function hideAllScreens() {
-    var screens = ['main-menu', 'loading-screen', 'pause-menu', 'settings-panel', 'win-screen', 'ranking-screen', 'achievement-screen', 'shop-screen', 'item-panel', 'ghost-modal', 'secret-modal', 'replay-bar'];
+    var screens = ['main-menu', 'loading-screen', 'pause-menu', 'settings-panel', 'win-screen', 'ranking-screen', 'achievement-screen', 'shop-screen', 'checkin-screen', 'dev-screen', 'item-panel', 'ghost-modal', 'secret-modal', 'replay-bar'];
     for (var i = 0; i < screens.length; i++) hide(screens[i]);
   }
 
@@ -790,17 +844,18 @@
   }
 
   /* ------------------------------------------------------------
-   * 隐藏彩蛋：长按"商店"按钮 / 商店界面标题 → 问答输入框（答案区分大小写）
+   * 开发者入口：长按"商店"按钮 / 商店界面标题 → 连答两题 → 开发者选项
    * - 短按商店：正常打开商店
-   * - 长按约 0.5 秒：震动反馈并立即弹窗（无需等松开）
-   * - 答对"deepseek"奖励 99,999 金币；答对"AdroitHare8579"奖励全道具 +99,999
-   *   （两份奖励均可重复获取、可累积；道具不做上限截断）
+   * - 长按约 0.48 秒：震动反馈并立即弹窗（无需等松开）
+   * - 这是"验证门"，本身不发任何奖励；答对两题后交给 MG.Dev 打开面板
+   * - 两题都答错即关闭，不提示错在哪一题
    * ---------------------------------------------------------- */
-  /** 彩蛋答案表（区分大小写）：每个答案对应一份奖励（可重复获取） */
-  var SECRET_ANSWERS = {
-    'deepseek': 'coins',        // 奖励①：+99,999 金币（可重复）
-    'AdroitHare8579': 'items'   // 奖励②：各道具 +99,999（可累积；金币收益仅按一次买断）
-  };
+  /** 验证题（逐题校验；最多两道，题目文案见 index.html 的默认值，这里以表为准） */
+  var DEV_GATE = [
+    { q: '这个项目的 AI 制作者是谁？', a: 'deepseek', ignoreCase: true },
+    { q: '作者的名字（游戏 ID）是什么？', a: 'AdroitHare8579', ignoreCase: false }
+  ];
+  var gateStep = 0;
   var SECRET_HOLD_MS = 480;     // 长按阈值：达到即弹窗（低于浏览器原生长按手势，避免被抢占）
   var secretAwaitRelease = false; // 弹窗打开后按压尚未结束（等"松开"来吞掉合成点击）
   var secretAwaitTimer = null;  // 松开等待的兜底计时器
@@ -811,10 +866,24 @@
     return Date.now() < secretClickGuardUntil;
   }
 
-  /** 打开彩蛋输入框 */
+  /** 渲染当前题号与题目 */
+  function renderGateStep() {
+    var cur = DEV_GATE[gateStep] || DEV_GATE[0];
+    if (el['secret-question']) el['secret-question'].textContent = cur.q;
+    if (el['secret-note']) {
+      el['secret-note'].textContent = '第 ' + (gateStep + 1) + ' / ' + DEV_GATE.length + ' 题';
+    }
+    if (el['secret-input']) {
+      el['secret-input'].value = '';
+      try { el['secret-input'].focus(); } catch (e) { /* 忽略 */ }
+    }
+  }
+
+  /** 打开验证弹窗（从第 1 题开始） */
   function openSecretDialog() {
     if (!el['secret-modal']) return;
-    if (el['secret-input']) el['secret-input'].value = '';
+    gateStep = 0;
+    renderGateStep();
     show('secret-modal');
     // 记录"按压尚未结束"：稍后松开时吞掉一次合成点击，防止误触弹窗按钮
     //（兜底：6 秒内没有任何松开事件则自动解除）
@@ -825,16 +894,15 @@
       secretAwaitTimer = null;
     }, 6000);
     // 自动聚焦，方便直接输入（移动端通常会直接弹起键盘）
-    if (el['secret-input']) {
-      setTimeout(function () {
-        try { el['secret-input'].focus(); } catch (e) { /* 忽略 */ }
-      }, 60);
-    }
+    setTimeout(function () {
+      try { if (el['secret-input']) el['secret-input'].focus(); } catch (e) { /* 忽略 */ }
+    }, 60);
   }
 
-  /** 关闭彩蛋输入框（不发放奖励） */
+  /** 关闭验证弹窗（不做任何事） */
   function closeSecretDialog() {
     secretAwaitRelease = false;
+    gateStep = 0;
     if (secretAwaitTimer) { clearTimeout(secretAwaitTimer); secretAwaitTimer = null; }
     if (el['secret-input']) {
       try { el['secret-input'].blur(); } catch (e) { /* 忽略 */ }
@@ -842,31 +910,40 @@
     hide('secret-modal');
   }
 
-  /** 提交答案：命中答案表即发放对应奖励（可重复获取，每次答对都发放） */
+  /**
+   * 提交答案：逐题推进；两题全对才打开开发者选项。
+   * 任一题答错 → 立即关闭（不提示错在哪一题，也不发任何奖励）
+   */
   function submitSecretAnswer() {
-    if (!el['secret-input'] || !MG.Shop) return;
-    var answer = (el['secret-input'].value || '').trim();
+    if (!el['secret-input']) return;
+    var raw = el['secret-input'].value || '';
+    var answer = raw.replace(/^\s+|\s+$/g, '');
     if (!answer) return; // 空输入直接忽略（也避免"松开合成点击"误触确认按钮）
-    // hasOwnProperty 校验，防止 'toString' 等原型链键被误判为正确
-    var rewardKey = Object.prototype.hasOwnProperty.call(SECRET_ANSWERS, answer)
-      ? SECRET_ANSWERS[answer] : null;
-    if (rewardKey) {
-      if (rewardKey === 'coins') {
-        MG.Shop.claimSecretGift();
-        if (MG.Audio && S.get().sfx) MG.Audio.purchase();
-        toast(iconHtml('party') + ' 答对了！奖励 ' + formatNum(MG.Shop.SECRET_GIFT_COINS || 99999) + ' 金币已到账', 1800, true);
-      } else if (rewardKey === 'items') {
-        MG.Shop.claimSecretItemGift();
-        if (MG.Audio && S.get().sfx) MG.Audio.purchase();
-        toast(iconHtml('party') + ' 答对了！所有道具 +' + formatNum(MG.Shop.SECRET_GIFT_ITEM_COUNT || 99999) +
-          ' 已到账（可累积，金币收益为一次买断）', 1800, true);
-      }
-      closeSecretDialog();
-      refreshShop(); // 同步商店余额 / 道具显示
-    } else {
+
+    var cur = DEV_GATE[gateStep];
+    if (!cur) { closeSecretDialog(); return; }
+    var hit = cur.ignoreCase
+      ? (answer.toLowerCase() === cur.a.toLowerCase())
+      : (answer === cur.a);
+
+    if (!hit) {
       if (MG.Audio && S.get().sfx) MG.Audio.error();
-      toast('答案不对，再想想～');
+      toast('答案不对');
+      closeSecretDialog();
+      return;
     }
+
+    gateStep++;
+    if (gateStep < DEV_GATE.length) {
+      renderGateStep();
+      if (MG.Audio && S.get().sfx) MG.Audio.click();
+      return;
+    }
+
+    // 两题全对
+    closeSecretDialog();
+    if (MG.Dev && MG.Dev.unlockAndOpen) MG.Dev.unlockAndOpen();
+    else toast('开发者选项未加载');
   }
 
   /** 达到长按阈值：震动反馈 + 立即弹窗（不用等松开，反馈更即时） */
@@ -993,6 +1070,9 @@
     for (var i = 0; i < items.length; i++) {
       var it = items[i];
       if (it.type !== 'count') continue;
+      // passive 道具（如「签到护符」）自动生效、没有手动使用动作，不进这个面板：
+      // 这里每行都带「使用」按钮，放进来只会让人点了没反应。其数量显示在签到面板头部。
+      if (it.passive) continue;
       var n = MG.Shop.countOf(it.id);
       if (n <= 0) continue;
       html += '<li class="item-row">' +
@@ -1002,6 +1082,8 @@
         '<button class="mini-btn item-use-btn" data-use-id="' + it.id + '">使用</button>' +
       '</li>';
     }
+    // 沙盒测试局：追加"生成器"入口（js/dev.js 提供；非沙盒时返回空串，完全无副作用）
+    if (MG.Dev && MG.Dev.getItemPanelRows) html += MG.Dev.getItemPanelRows();
     if (!html) {
       html = '<li class="item-empty">暂无道具，去主菜单的「' + iconHtml('shop') + ' 商店」看看吧</li>';
     }
@@ -1480,6 +1562,8 @@
 
   function drawMinimap(player, maze, mazeView, settings) {
     if (!mapCtx || !settings.minimap) return;
+    // 上次 resize 时容器还隐藏着（clientWidth=0），趁这次可见补算分辨率
+    if (minimapResizePending) resizeMinimap();
     // 未找到地图道具前不绘制内容（占位由 updateMinimapLock 负责）
     if (MG.game && !MG.game.mapFound) return;
     var cb = !!settings.colorblind; // 色盲友好模式：颜色 + 形状双编码
@@ -1789,6 +1873,7 @@
     init: init,
     show: show,
     hide: hide,
+    hideAllScreens: hideAllScreens,
     showMainMenu: showMainMenu,
     showGame: showGame,
     showPause: showPause,

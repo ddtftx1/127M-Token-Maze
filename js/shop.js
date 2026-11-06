@@ -23,7 +23,8 @@
     boostEarn: false,    // 是否已购买"金币收益 +25%"（买断）
     mapUnlock: 0,        // 小地图开局解锁剩余次数
     bestPath: 0,         // 最佳路径剩余次数
-    fastPath: 0          // 最快路径剩余次数
+    fastPath: 0,         // 最快路径剩余次数
+    streakShield: 0      // 签到护符剩余个数（漏签时自动消耗，无手动使用动作）
   };
 
   /** 商品表（数值定案，直购无折扣） */
@@ -42,6 +43,14 @@
       id: 'fastPath', icon: 'bolt', name: '最快路径', short: '最快路径',
       desc: '启动"最快路径"自动寻路：忽略沿途金币与地图，径直冲向终点',
       price: 20, limit: 99, type: 'count'
+    },
+    {
+      id: 'streakShield', icon: 'shield', name: '签到护符', short: '签到护符',
+      desc: '漏签时自动消耗 1 个，保住连签天数（仅对漏签 5 天以内有效，超过则连签清零）',
+      price: 40, limit: 99, type: 'count',
+      // passive：自动生效的道具。道具面板不给它"使用"按钮（见 js/ui.js renderItemPanel），
+      // 数量显示在签到面板头部 —— 放在道具面板里只会让人点了没反应
+      passive: true
     },
     {
       id: 'boostEarn', icon: 'money', name: '金币收益 +25%', short: '金币收益 +25%',
@@ -73,7 +82,10 @@
       boostEarn: DEFAULT_WALLET.boostEarn,
       mapUnlock: DEFAULT_WALLET.mapUnlock,
       bestPath: DEFAULT_WALLET.bestPath,
-      fastPath: DEFAULT_WALLET.fastPath
+      fastPath: DEFAULT_WALLET.fastPath,
+      // 新增字段必须同时出现在这里与下面的 countKeys：normalizeWallet 是"按白名单重建"的，
+      // 只写进 countKeys 而不初始化，老存档读进来时该字段仍是 undefined（随后被 JSON.stringify 丢掉）
+      streakShield: DEFAULT_WALLET.streakShield
     };
     if (!data || typeof data !== 'object') return w;
 
@@ -82,7 +94,7 @@
     }
     if (typeof data.boostEarn === 'boolean') w.boostEarn = data.boostEarn;
 
-    var countKeys = ['mapUnlock', 'bestPath', 'fastPath'];
+    var countKeys = ['mapUnlock', 'bestPath', 'fastPath', 'streakShield'];
     for (var i = 0; i < countKeys.length; i++) {
       var k = countKeys[i];
       if (typeof data[k] === 'number' && isFinite(data[k])) {
@@ -93,8 +105,28 @@
     return w;
   }
 
+  /**
+   * 多标签页同步：别的标签页写过钱包时，把本标签的模块级缓存作废。
+   *
+   * 背景：钱包是"整份对象缓存 + 整份 JSON 回写"。两个标签页同时开着时，
+   * A 标签的缓存是旧值，A 一写盘就把 B 的收益覆盖掉（实测另一标签 500 币被冲成 6）。
+   * 这里只做**缓存失效**（下一次 getWallet 重新读盘），不广播状态、不改存档结构，
+   * 也不引入任何跨标签副作用；storage 事件不会在本标签自己写入时触发。
+   */
+  var storageBound = false;
+  function bindStorageSync() {
+    if (storageBound) return;
+    if (typeof global.addEventListener !== 'function') return;
+    storageBound = true;
+    global.addEventListener('storage', function (e) {
+      // e.key === null 表示执行了 localStorage.clear()
+      if (!e || e.key === null || e.key === STORAGE_KEY) wallet = null;
+    }, false);
+  }
+
   /** 读取钱包（带内存缓存） */
   function getWallet() {
+    bindStorageSync();
     if (wallet) return wallet;
     var raw = safeGet(STORAGE_KEY);
     if (!raw) {
@@ -227,39 +259,6 @@
     return getWallet().boostEarn ? BOOST_MULTIPLIER : 1.0;
   }
 
-  /** 隐藏彩蛋奖励①：金币数（长按商店 → 答对问题） */
-  var SECRET_GIFT_COINS = 99999;
-  /** 隐藏彩蛋奖励②：道具数量（金币收益按一次性买断处理） */
-  var SECRET_GIFT_ITEM_COUNT = 99999;
-
-  /**
-   * 领取隐藏彩蛋奖励①（答对"deepseek"专用）：+99,999 金币
-   * 可重复获取：每次答对都会发放
-   * @returns {boolean} 是否发放成功
-   */
-  function claimSecretGift() {
-    var w = getWallet();
-    w.coins += SECRET_GIFT_COINS;
-    saveWallet();
-    return true;
-  }
-
-  /**
-   * 领取隐藏彩蛋奖励②（答对"AdroitHare8579"专用）：各道具 +99,999（可累积，不做 99 上限截断）
-   * - 可重复获取：每次答对都会发放（例：已有 80 → 179 → 278 …）
-   * - 金币收益为买断类道具：只相当于一次购买（boostEarn = true，不叠加）
-   * @returns {boolean} 是否发放成功
-   */
-  function claimSecretItemGift() {
-    var w = getWallet();
-    w.mapUnlock = countOf('mapUnlock') + SECRET_GIFT_ITEM_COUNT;
-    w.bestPath = countOf('bestPath') + SECRET_GIFT_ITEM_COUNT;
-    w.fastPath = countOf('fastPath') + SECRET_GIFT_ITEM_COUNT;
-    w.boostEarn = true; // 买断类：只相当于一次购买
-    saveWallet();
-    return true;
-  }
-
   /* ------------------------------------------------------------
    * 导出
    * ---------------------------------------------------------- */
@@ -278,11 +277,7 @@
     buy: buy,
     consumeItem: consumeItem,
     addItem: addItem,
-    coinMultiplier: coinMultiplier,
-    SECRET_GIFT_COINS: SECRET_GIFT_COINS,
-    SECRET_GIFT_ITEM_COUNT: SECRET_GIFT_ITEM_COUNT,
-    claimSecretGift: claimSecretGift,
-    claimSecretItemGift: claimSecretItemGift
+    coinMultiplier: coinMultiplier
   };
 
 })(window);

@@ -96,7 +96,9 @@
             var prevT = this.frames[this.frames.length - 1][3];
             if (tEnd <= prevT) tEnd = prevT + 0.01;
           }
-          this.frames.push(compressFrame(x, z, yaw || 0, tEnd));
+          // 终点帧同样受帧数上限约束：否则可能存出 MAX_FRAMES + 1 帧，
+          // 与"单局最多 9000 帧"的注释口径不一致
+          if (this.frames.length < MAX_FRAMES) this.frames.push(compressFrame(x, z, yaw || 0, tEnd));
         }
         return this.frames;
       }
@@ -164,13 +166,31 @@
     return ok;
   }
 
-  /** 读取一局回放的帧序列（不存在返回 null） */
+  /**
+   * 校验帧序列形状：必须是 >= 2 帧的数组，每帧是 4 个有限数字 [x, z, yaw, t]。
+   * 损坏/被手改的存档若不校验，sample() 会在主循环里每帧抛 TypeError
+   * （幽灵与回放都走它），整局逻辑被跳过且不自愈。
+   */
+  function validFrames(frames) {
+    if (Object.prototype.toString.call(frames) !== '[object Array]') return false;
+    if (frames.length < 2) return false;
+    for (var i = 0; i < frames.length; i++) {
+      var f = frames[i];
+      if (!f || f.length < 4) return false;
+      for (var j = 0; j < 4; j++) {
+        if (typeof f[j] !== 'number' || !isFinite(f[j])) return false;
+      }
+    }
+    return true;
+  }
+
+  /** 读取一局回放的帧序列（不存在或已损坏返回 null） */
   function load(diffKey, seed) {
     var raw = safeGet(makeKey(diffKey, seed));
     if (!raw) return null;
     try {
       var data = JSON.parse(raw);
-      if (!data || !data.frames || !data.frames.length) return null;
+      if (!data || !validFrames(data.frames)) return null;
       return data.frames;
     } catch (e) {
       return null;
@@ -183,7 +203,7 @@
     if (!raw) return null;
     try {
       var data = JSON.parse(raw);
-      if (!data || !data.frames || !data.frames.length) return null;
+      if (!data || !validFrames(data.frames)) return null;
       return data;
     } catch (e) {
       return null;
@@ -239,7 +259,10 @@
    * @returns {{x:number, z:number, yaw:number}|null}
    */
   function sample(frames, t) {
-    if (!frames || frames.length === 0) return null;
+    // 调用方（回放 / 幽灵）已经过滤过，这里再兜一层：损坏帧直接返回 null，
+    // 让"这一帧没有幽灵"而不是"整个主循环抛异常"
+    if (!validFrames(frames)) return null;
+    if (typeof t !== 'number' || !isFinite(t)) return null;
     if (t <= frames[0][3]) {
       return { x: frames[0][0], z: frames[0][1], yaw: frames[0][2] };
     }

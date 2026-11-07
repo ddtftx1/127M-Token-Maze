@@ -276,6 +276,12 @@
   function show(id) {
     var node = document.getElementById(id);
     if (node) node.classList.remove('hidden');
+    /* BUG-034：解锁开发者选项后，各界面要常驻一个免密入口。
+       这里每次切界面补挂一次（幂等、未解锁时直接返回），
+       这样即使某个界面的 DOM 被重建过，入口也不会丢。 */
+    if (MG.Dev && MG.Dev.isUnlocked && MG.Dev.isUnlocked() && MG.Dev.mountQuickEntries) {
+      MG.Dev.mountQuickEntries();
+    }
   }
   function hide(id) {
     var node = document.getElementById(id);

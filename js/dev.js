@@ -1400,7 +1400,12 @@
     /** main.js：处理 dev: 前缀的道具点击 */
     handleItemUse: handleItemUse,
     /** 调试用：当前是否沙盒局 */
-    isSandbox: function () { return sandboxActive; }
+    isSandbox: function () { return sandboxActive; },
+    /** ui.js：每次切换界面后补挂免密入口（幂等），防止界面 DOM 重建后入口消失（BUG-034） */
+    mountQuickEntries: function () {
+      if (!unlocked) return;
+      mountQuickEntries();
+    }
   };
 
 })(window);

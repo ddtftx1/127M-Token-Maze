@@ -1750,20 +1750,77 @@
   /* ------------------------------------------------------------
    * 全屏
    * ---------------------------------------------------------- */
+  /* BUG-030（2026-11-07）：原实现是"先弹 toast 再去试"——
+     toast('已进入全屏') 紧跟在 requestFullscreen 之后无条件执行，而失败路径上
+     promise 的 reject 挂的是空 handler、同步异常又被 try/catch 整个吞掉。
+     于是浏览器拒绝进入全屏时，玩家看到的是「已进入全屏」这句假话 + 画面毫无变化，
+     表现就是"全屏图标点了没反应、也没有任何解释"。
+     现在三条腿一起兜：
+       ① 根本没有对应 API → 直接说明；
+       ② 同步异常 / promise reject → 给出失败原因；
+       ③ 只有 fullscreenchange 才算成功，另有 900ms 兜底（老内核既无 promise、
+          也可能不派发事件）。 */
+  var fsStateKnown = null;   // 上一次已知的全屏状态，用于给重复事件去重
+
+  function fullscreenElement() {
+    var doc = document;
+    return doc.fullscreenElement || doc.webkitFullscreenElement || null;
+  }
+
+  function onFullscreenChange() {
+    var on = !!fullscreenElement();
+    if (on === fsStateKnown) return;   // 两种事件可能都派发，同一状态只提示一次
+    fsStateKnown = on;
+    toast(on ? '已进入全屏' : '已退出全屏');
+  }
+
+  function bindFullscreenChange() {
+    if (bindFullscreenChange.done) return;
+    bindFullscreenChange.done = true;
+    try {
+      document.addEventListener('fullscreenchange', onFullscreenChange);
+      document.addEventListener('webkitfullscreenchange', onFullscreenChange);
+    } catch (e) { /* 忽略：实在不支持就只能靠 900ms 兜底 */ }
+  }
+
   function toggleFullscreen() {
     var doc = document;
     var elem = doc.documentElement;
-    var isFull = doc.fullscreenElement || doc.webkitFullscreenElement;
+    bindFullscreenChange();
+
+    var before = !!fullscreenElement();
+    var settled = false;
+
+    function fail(err) {
+      if (settled) return;
+      settled = true;
+      var why = err ? String(err.message || err.name || '') : '';
+      var head = before ? '退出全屏失败' : '进入全屏失败';
+      toast(why ? (head + '：' + why) : (head + '，请按 F11'), 2600);
+    }
+
     try {
-      if (!isFull) {
-        var p = (elem.requestFullscreen || elem.webkitRequestFullscreen || function () {}).call(elem);
-        if (p && p.catch) p.catch(function () {});
-        toast('已进入全屏');
+      var ret;
+      if (!before) {
+        var reqFn = elem.requestFullscreen || elem.webkitRequestFullscreen;
+        if (!reqFn) { toast('当前浏览器不支持全屏', 2600); return; }
+        ret = reqFn.call(elem);
       } else {
-        (doc.exitFullscreen || doc.webkitExitFullscreen || function () {}).call(doc);
-        toast('已退出全屏');
+        var exitFn = doc.exitFullscreen || doc.webkitExitFullscreen;
+        if (!exitFn) { toast('当前浏览器不支持退出全屏', 2600); return; }
+        ret = exitFn.call(doc);
       }
-    } catch (e) { /* 忽略 */ }
+      if (ret && typeof ret['catch'] === 'function') ret['catch'](fail);
+    } catch (e) {
+      fail(e);
+      return;
+    }
+
+    setTimeout(function () {
+      if (settled) return;
+      if (!!fullscreenElement() === before) fail(null);   // 状态没变 = 没生效
+      else settled = true;
+    }, 900);
   }
 
   /* ------------------------------------------------------------

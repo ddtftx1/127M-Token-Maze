@@ -22,7 +22,23 @@
   var LOG_MAX = 100;              // 日志环形缓冲上限
   var STATUS_MS = 4000;           // 状态条自动消失时间
   var CHECKIN_KEY = 'maze3d.checkin.v1';
-  var LEGACY_CLASSES = ['legacy-env', 'legacy-inset', 'legacy-gap', 'legacy-dvh'];
+  /* 老内核"模拟降级"三档（BUG-032）。
+   * 注意与 legacy-* 的区别：legacy-env / legacy-inset / legacy-gap / legacy-dvh 是
+   * **能力补偿**（只在浏览器确实不支持某项特性时才挂上，现代浏览器上永远不触发），
+   * 拿它做"模拟"必然点哪个都一样。这里改成三档**真的会降低 UI 观感**的 body class，
+   * 单选互斥、全站生效，方便去各个正常界面做验收。 */
+  var SIM_CLASSES = ['sim-legacy-1', 'sim-legacy-2', 'sim-legacy-3'];
+  var SIM_LABELS = {
+    'sim-legacy-1': '旧内核（无模糊/无动画/直角）',
+    'sim-legacy-2': '更老内核（叠加无渐变、面板不透明）',
+    'sim-legacy-3': '无硬件加速（叠加图标灰化、重边框）'
+  };
+  /** 解锁后挂"免密入口"的容器（BUG-034）：每个界面一个 */
+  var QUICK_MOUNT_IDS = [
+    'main-menu', 'pause-menu', 'settings-panel', 'win-screen',
+    'achievement-screen', 'ranking-screen', 'shop-screen',
+    'checkin-screen', 'item-panel', 'ghost-modal', 'hud'
+  ];
   /** 真正会发声的音效（顺序即展示顺序） */
   var AUDIO_SFX = [
     'click', 'step', 'pathStart', 'pathCancel', 'coin',
@@ -296,6 +312,7 @@
    * ---------------------------------------------------------- */
   function unlockAndOpen() {
     unlocked = true;
+    mountQuickEntries();   // BUG-034：解锁后各界面常驻免密入口
     open();
   }
 
@@ -330,7 +347,7 @@
     // 状态条定时器要清：否则关闭面板后 4 秒内仍有一次回调去改已隐藏的 dev-status
     if (statusTimer) { clearTimeout(statusTimer); statusTimer = null; }
     unmuteAudio();
-    restoreLegacy(false);
+    // 注意：这里**不要**清掉 sim-legacy-* —— 模拟降级要能延续到别的界面去验收（BUG-032）
     // 显式隐藏：即使 hideAllScreens 的名单将来又被漏改，面板本身也一定关得掉（双保险）
     if (MG.UI && MG.UI.hide) MG.UI.hide('dev-screen');
     var node = $('dev-screen');
@@ -569,18 +586,20 @@
         '<input class="dev-range" type="range" id="dev-speed" min="0.5" max="2" step="0.1" value="' + (s.moveSpeed || 1) + '" />' +
         '<span class="dev-mono" id="dev-speed-val">' + (s.moveSpeed || 1) + '</span></div>');
 
-    var cls = document.body.className || '';
-    var legacyRow = '';
-    for (var i = 0; i < LEGACY_CLASSES.length; i++) {
-      var c = LEGACY_CLASSES[i];
-      var on = cls.indexOf(c) >= 0;
-      legacyRow += '<button class="dev-btn' + (on ? ' is-active' : '') + '" data-act="toggle-legacy" data-arg="' + c + '">' +
-        c + '：' + (on ? '开' : '关') + '</button>';
+    var simCur = currentSim();
+    var simRow = '';
+    for (var i = 0; i < SIM_CLASSES.length; i++) {
+      var c = SIM_CLASSES[i];
+      simRow += '<button class="dev-btn' + (simCur === c ? ' is-active' : '') + '"' +
+        ' data-act="set-sim" data-arg="' + c + '">' + SIM_LABELS[c] + '</button>';
     }
-    html += card('老内核模拟', '手动挂/摘 body 上的 legacy-* class，用来验降级样式',
-      '<div class="dev-btn-grid">' + legacyRow + '</div>' +
-      '<div class="dev-row">' + btn('全部关闭', 'clear-legacy') +
-        '<span class="dev-hint">离开面板时也会自动还原</span></div>');
+    html += card('老内核模拟（真降级）',
+      '单选互斥：点一个只留一个，再点一次取消。降级会作用到所有正常界面，' +
+      '关掉面板后仍然保持 —— 可以退回主菜单 / 商店 / 排行榜 / 开局现场逐一验收。刷新页面即还原。',
+      '<div class="dev-btn-grid">' + simRow + '</div>' +
+      '<div class="dev-row">' + btn('关闭模拟', 'clear-sim') +
+        '<span class="dev-hint">回到正常观感</span></div>' +
+      (simCur ? '<div class="dev-sim-warn">当前正在模拟：' + SIM_LABELS[simCur] + '（仅用于测试）</div>' : ''));
 
     box.innerHTML = html;
   }
@@ -1058,18 +1077,17 @@
       setStatus('ok', '已切换 ' + arg);
       return;
     }
-    if (act === 'toggle-legacy') {
-      var has = (document.body.className || '').indexOf(arg) >= 0;
-      if (has) document.body.classList.remove(arg);
-      else document.body.classList.add(arg);
+    if (act === 'set-sim') {
+      applySim(arg);
       renderBody();
-      setStatus('ok', arg + ' → ' + (has ? '关' : '开'));
+      var now = currentSim();
+      setStatus('ok', now ? ('当前模拟：' + SIM_LABELS[now]) : '已关闭老内核模拟');
       return;
     }
-    if (act === 'clear-legacy') {
-      restoreLegacy(true);
+    if (act === 'clear-sim') {
+      applySim(null);
       renderBody();
-      setStatus('ok', '已移除全部 legacy-* class');
+      setStatus('ok', '已关闭老内核模拟，界面恢复原样');
       return;
     }
     /* --- 玩法 --- */
@@ -1220,28 +1238,72 @@
     MG.UI.menuCallbacks.onStart(diff, seed, false);
   }
 
-  /** 还原 body 上的 legacy-* class（离开面板时自动调用） */
-  function restoreLegacy(force) {
-    for (var i = 0; i < LEGACY_CLASSES.length; i++) {
-      // 只移除"本面板挂上去的"：面板打开时记录了初始状态，这里按初始状态恢复
-      var cls = LEGACY_CLASSES[i];
-      var wasOn = legacyInitial[cls] === true;
-      var isOn = (document.body.className || '').indexOf(cls) >= 0;
-      if (force) {
-        if (isOn && !wasOn) document.body.classList.remove(cls);
-      } else if (isOn !== wasOn) {
-        if (wasOn) document.body.classList.add(cls);
-        else document.body.classList.remove(cls);
-      }
+  /* ------------------------------------------------------------
+   * 老内核模拟（BUG-032）与免密入口（BUG-034）
+   * ---------------------------------------------------------- */
+
+  /** 当前处于哪一档模拟：取"最高"的那一档（三档是叠加关系）；没有则返回 '' */
+  function currentSim() {
+    var cls = document.body.className || '';
+    var found = '';
+    for (var i = 0; i < SIM_CLASSES.length; i++) {
+      if (cls.indexOf(SIM_CLASSES[i]) >= 0) found = SIM_CLASSES[i];
     }
+    return found;
   }
 
-  var legacyInitial = {};
+  /** 档位序号，非本档位返回 -1 */
+  function simIndex(tier) {
+    for (var i = 0; i < SIM_CLASSES.length; i++) {
+      if (SIM_CLASSES[i] === tier) return i;
+    }
+    return -1;
+  }
 
-  function captureLegacy() {
-    var cls = document.body.className || '';
-    for (var i = 0; i < LEGACY_CLASSES.length; i++) {
-      legacyInitial[LEGACY_CLASSES[i]] = cls.indexOf(LEGACY_CLASSES[i]) >= 0;
+  /**
+   * 应用老内核模拟（单选互斥）。
+   * 三档是**叠加**关系：选第 2 档会同时挂上第 1 档的 class，
+   * 这样 CSS 侧每档只用写"本档新增的降级"，不必把前档规则复制一遍。
+   * @param {string|null} tier 目标档位；传 null，或与当前最高档相同 → 全部关闭
+   */
+  function applySim(tier) {
+    var body = document.body;
+    if (!body || !body.classList) return;
+    var cur = currentSim();
+    var target = (tier && tier === cur) ? null : tier;
+    var upto = target ? simIndex(target) : -1;
+    for (var i = 0; i < SIM_CLASSES.length; i++) {
+      var want = (i <= upto);
+      var has = body.classList.contains(SIM_CLASSES[i]);
+      if (want && !has) body.classList.add(SIM_CLASSES[i]);
+      else if (!want && has) body.classList.remove(SIM_CLASSES[i]);
+    }
+    // 模拟降级只改 CSS 观感，**不碰** MG.Settings、不碰 3D 场景、不写 localStorage
+  }
+
+  /**
+   * 在每一个界面上挂一个低调的开发者入口（BUG-034）。
+   * 解锁状态仍然只存内存：刷新页面 / 重开游戏后入口全部消失，需要重新过两题口令。
+   */
+  function mountQuickEntries() {
+    for (var i = 0; i < QUICK_MOUNT_IDS.length; i++) {
+      var host = $(QUICK_MOUNT_IDS[i]);
+      if (!host) continue;
+      if (host.querySelector && host.querySelector('.dev-quick')) continue;
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'dev-quick' + (QUICK_MOUNT_IDS[i] === 'hud' ? ' dev-quick-hud' : '');
+      b.title = '开发者选项';
+      b.appendChild(document.createTextNode('◇'));
+      b.addEventListener('click', function (e) {
+        if (e) {
+          if (e.stopPropagation) e.stopPropagation();
+          if (e.preventDefault) e.preventDefault();
+        }
+        playAudioRaw('click');
+        open();
+      });
+      host.appendChild(b);
     }
   }
 
@@ -1286,7 +1348,6 @@
       return false;
     }
     hookConsole();
-    captureLegacy();   // 记录开机时的 legacy-* 状态，退出面板时按它还原
     if (els['dev-body']) {
       els['dev-body'].addEventListener('click', onBodyClick);
       els['dev-body'].addEventListener('input', onBodyInput);

@@ -138,6 +138,91 @@
     renderer.toneMappingExposure = 1.05;
   }
 
+  /** 画质档位的中文名（提示文案用） */
+  function qualityLabel(q) {
+    return q === 'low' ? '低' : (q === 'high' ? '高' : '中');
+  }
+
+  /**
+   * 画质相关的光照档位（BUG-033）。
+   * setupLights() 只在初始化时跑一次，切画质时太阳强度与阴影贴图尺寸要在这里补。
+   * 阴影贴图一旦分配，尺寸就固定了：必须丢弃 map，让下一次渲染按新尺寸重新分配。
+   */
+  function applyQualityToSun(settings) {
+    if (!Game.sun) return;
+    var low = settings.quality === 'low';
+    Game.sun.intensity = low ? 0.7 : 1.1;
+    var size = low ? 512 : 1024;
+    if (Game.sun.shadow.mapSize.width !== size || Game.sun.shadow.mapSize.height !== size) {
+      Game.sun.shadow.mapSize.width = size;
+      Game.sun.shadow.mapSize.height = size;
+      if (Game.sun.shadow.map) {
+        if (Game.sun.shadow.map.dispose) Game.sun.shadow.map.dispose();
+        Game.sun.shadow.map = null;
+      }
+    }
+  }
+
+  /**
+   * 按当前设置重建渲染器（BUG-033）。
+   *
+   * antialias 是 WebGL 上下文创建参数，**创建之后无法修改**；桌面端
+   * devicePixelRatio 恒为 1，maxDPR 三档又完全等价。所以"低 / 中 / 高"
+   * 想在桌面上真正看出来，就必须换一张画布 + 新渲染器。
+   * 场景 / 相机 / 迷宫 / 玩家位置都与渲染器无关，直接复用 → 本局进度不丢。
+   *
+   * 与 recreateRenderer() 的分工：那个是 WebGL 上下文丢失后的救援流程
+   * （带 _ctxLost 守卫、走 overlay 提示层）；这里是设置变更触发的主动重建，
+   * 两者互不干扰。
+   *
+   * @returns {boolean} 是否重建成功
+   */
+  function rebuildRenderer() {
+    if (!Game.scene || !Game.camera) return false;
+    var oldCanvas = MG.UI.el['game-canvas'];
+    var parent = oldCanvas && oldCanvas.parentNode;
+    if (!parent) return false;
+
+    var settings = MG.Settings.get();
+    var newCanvas = document.createElement('canvas');
+    newCanvas.id = 'game-canvas';
+    var renderer = null;
+    try {
+      renderer = new THREE.WebGLRenderer({
+        canvas: newCanvas,
+        antialias: settings.quality === 'high',
+        powerPreference: 'high-performance',
+        alpha: false,
+        stencil: false
+      });
+      setupRenderer(renderer, settings);
+    } catch (e) {
+      console.error('[game] 画质切换重建渲染器失败', e);
+      return false;
+    }
+
+    try { parent.replaceChild(newCanvas, oldCanvas); } catch (e) { parent.appendChild(newCanvas); }
+    MG.UI.el['game-canvas'] = newCanvas;
+    if (Game.input) Game.input.canvas = newCanvas;
+    if (Game.player) Game.player.canvas = newCanvas;
+
+    var oldRenderer = Game.renderer;
+    Game.renderer = renderer;
+    if (oldRenderer && oldRenderer.dispose) {
+      try { oldRenderer.dispose(); } catch (e) { /* 旧上下文释放失败无所谓 */ }
+    }
+
+    resetShadowMaps();
+    bindContextLoss(newCanvas);
+    Game._renderErrLogged = false;
+    try {
+      renderer.render(Game.scene, Game.camera);
+    } catch (e) {
+      console.error('[game] 画质切换后首帧渲染失败', e);
+    }
+    return true;
+  }
+
   /* ------------------------------------------------------------
    * WebGL 上下文丢失 / 恢复（BUG-029）
    * ------------------------------------------------------------
@@ -624,7 +709,8 @@
         // 限程停下的瞬间：若本次是"最佳路径"，顺手拾取所在格附近的金币
         // （避免"停在金币格上却没捡到"——拾取半径 1.5 覆盖整格，且不会隔墙误拾）
         var picked = 0;
-        if (p.autoStoppedKind === 'best' && Game.mazeView) {
+        // BUG-031：最快路径同样要"路过就捡"，限程停下时也顺手拾取所在格附近的金币
+        if ((p.autoStoppedKind === 'best' || p.autoStoppedKind === 'fast') && Game.mazeView) {
           picked = Game.mazeView.tryCollect(p.pos.x, p.pos.z, 1.5);
           if (picked > 0) {
             Game.collectedCoins += picked;
@@ -1461,53 +1547,61 @@
         }
       }
 
-      // 6) 金币收集（"最快路径"忽略沿途收集；"最佳路径"拾取半径略放宽，留出路径圆角的误差余量）
+      /* 6) 金币收集
+       * 拾取半径：最佳路径略放宽（留出路径圆角的误差余量），其余用常规值。
+       *
+       * BUG-031（2026-11-07）：原实现是 if (autoKind !== 'fast') { ... }，把"最快路径"
+       * 整段收集逻辑跳过，于是最快路径**路过**金币与地图卷轴时什么都不发生，
+       * 看起来像"直接穿过两张贴图"。用户明确要求：路过了就该捡。
+       *
+       * 这里把"推进"与"收集"解耦 —— "最快"只表示**不主动绕路**去捡目标
+       * （目标收集见 buildBestPath 分支），不表示"路过也不捡"。
+       * 半径仍沿用常规 0.85，不因为快而放大，避免把隔壁格的东西吸过来。
+       */
       var autoKind = Game.player.autoActive ? Game.player.autoKind : null;
-      if (autoKind !== 'fast') {
-        var collectRadius = autoKind === 'best' ? 1.1 : 0.85;
-        var got = Game.mazeView.tryCollect(Game.player.pos.x, Game.player.pos.z, collectRadius);
-        if (got > 0) {
-          Game.collectedCoins += got;
-          if (MG.Audio) MG.Audio.coin();
-          MG.UI.toast('+' + got + ' 金币（' + Game.collectedCoins + '/' + Game.mazeView.totalCoins + '）', 1000);
+      var collectRadius = autoKind === 'best' ? 1.1 : 0.85;
+      var got = Game.mazeView.tryCollect(Game.player.pos.x, Game.player.pos.z, collectRadius);
+      if (got > 0) {
+        Game.collectedCoins += got;
+        if (MG.Audio) MG.Audio.coin();
+        MG.UI.toast('+' + got + ' 金币（' + Game.collectedCoins + '/' + Game.mazeView.totalCoins + '）', 1000);
+      }
+
+      /* 6.5) 地图道具拾取：入库；小地图是否已解锁，只影响"要不要刷新小地图状态"
+       *
+       * 设计变更（2026-10-30）：拾取 = mapUnlock 库存 +1，解锁动作交给玩家在道具面板里主动执行，
+       * 走 useItem('mapUnlock') 那条既有分支，因此拾取本身**不设置** Game.mapFound。
+       *
+       * BUG-022（2026-10-31）：这里原先写成
+       *     if (!Game.mapFound && Game.mazeView.tryCollectMap(...))
+       * 那个 && 短路导致"先用道具解锁小地图、再走到卷轴处"时整个分支不执行：
+       * 卷轴既不消失也不入库，看起来像一张只会转圈的贴图。
+       * A 改造前 mapFound 只在拾取那一刻才置 true，这条路径不可达；改造后可达了，守卫就成了死条件。
+       * 现在把 mapFound 的角色从"是否进入分支"降级为"是否刷新小地图状态"。
+       *
+       * 注意：本局已解锁时**绝不能**调用 updateMinimapLock(true, …)，
+       * 那会把已解锁的小地图重新锁上（HUD 距离信息与指南针距离一起消失），比原 bug 更严重。
+       *
+       * 库存与商店购买的 mapUnlock 共用同一份钱包，面板数量是合并后的值。 */
+      if (Game.mazeView.tryCollectMap(Game.player.pos.x, Game.player.pos.z, 1.2)) {
+        var mapItemAdded = !!(MG.Shop && MG.Shop.addItem && MG.Shop.addItem('mapUnlock', 1));
+        if (!mapItemAdded) console.warn('[game] 地图道具入库失败（钱包不可写），本局仍按已拾取处理');
+
+        if (MG.Audio) MG.Audio.mapFound();
+
+        if (Game.mapFound) {
+          // 本局已经解锁（玩家先用道具开了小地图）：只入库，小地图状态一个字都不动。
+          // 道具留到下一局用 —— 本局再用会走 useItem 的"本局已解锁，无需重复使用"分支。
+          MG.UI.toast('已获得地图道具（库存 +1）', 2600);
+        } else {
+          MG.UI.toast('已获得地图道具，可在道具面板中使用', 2600);
+          // 方位提示已失效：道具被拿走了，留着"地图在东侧"只会误导玩家。
+          // 小地图仍是锁定状态，这里只把提示行清空（中等/困难本来就没有提示，不受影响）。
+          Game.mapHint = '';
+          MG.UI.updateMinimapLock(true, Game.mapHint);
         }
 
-        /* 6.5) 地图道具拾取：入库；小地图是否已解锁，只影响"要不要刷新小地图状态"
-         *
-         * 设计变更（2026-10-30）：拾取 = mapUnlock 库存 +1，解锁动作交给玩家在道具面板里主动执行，
-         * 走 useItem('mapUnlock') 那条既有分支，因此拾取本身**不设置** Game.mapFound。
-         *
-         * BUG-022（2026-10-31）：这里原先写成
-         *     if (!Game.mapFound && Game.mazeView.tryCollectMap(...))
-         * 那个 && 短路导致"先用道具解锁小地图、再走到卷轴处"时整个分支不执行：
-         * 卷轴既不消失也不入库，看起来像一张只会转圈的贴图。
-         * A 改造前 mapFound 只在拾取那一刻才置 true，这条路径不可达；改造后可达了，守卫就成了死条件。
-         * 现在把 mapFound 的角色从"是否进入分支"降级为"是否刷新小地图状态"。
-         *
-         * 注意：本局已解锁时**绝不能**调用 updateMinimapLock(true, …)，
-         * 那会把已解锁的小地图重新锁上（HUD 距离信息与指南针距离一起消失），比原 bug 更严重。
-         *
-         * 库存与商店购买的 mapUnlock 共用同一份钱包，面板数量是合并后的值。 */
-        if (Game.mazeView.tryCollectMap(Game.player.pos.x, Game.player.pos.z, 1.2)) {
-          var mapItemAdded = !!(MG.Shop && MG.Shop.addItem && MG.Shop.addItem('mapUnlock', 1));
-          if (!mapItemAdded) console.warn('[game] 地图道具入库失败（钱包不可写），本局仍按已拾取处理');
-
-          if (MG.Audio) MG.Audio.mapFound();
-
-          if (Game.mapFound) {
-            // 本局已经解锁（玩家先用道具开了小地图）：只入库，小地图状态一个字都不动。
-            // 道具留到下一局用 —— 本局再用会走 useItem 的"本局已解锁，无需重复使用"分支。
-            MG.UI.toast('已获得地图道具（库存 +1）', 2600);
-          } else {
-            MG.UI.toast('已获得地图道具，可在道具面板中使用', 2600);
-            // 方位提示已失效：道具被拿走了，留着"地图在东侧"只会误导玩家。
-            // 小地图仍是锁定状态，这里只把提示行清空（中等/困难本来就没有提示，不受影响）。
-            Game.mapHint = '';
-            MG.UI.updateMinimapLock(true, Game.mapHint);
-          }
-
-          updateHudData(); // 库存数变了：刷新 HUD 的道具数量与钱包
-        }
+        updateHudData(); // 库存数变了：刷新 HUD 的道具数量与钱包
       }
 
       // 7) 终点判定（沙盒空场没有终点：prepareMaze 仍会设 maze.end，走到对角会误判通关）
@@ -1645,13 +1739,32 @@
       }
     }
 
-    // 画质（像素比）
+    /* 画质（BUG-033）
+     * 原实现只调 applyPixelRatio() + onResize()，可这两样在桌面上都没有可感知差异：
+     * 桌面 devicePixelRatio 恒为 1 → maxDPR 1 / 1.5 / 2 三档算出来都是 1；
+     * 抗锯齿又是创建期参数，改不了。于是"怎么调都是同一个高画质"。
+     * 现在切档时：① 换画布重建渲染器（抗锯齿真正换掉）；② 太阳强度与阴影贴图尺寸换档；
+     * ③ MazeView 就地换墙檐 / 粒子 / 阴影接收。三档在桌面上都立刻可见。 */
     if (evt.key === 'quality' || evt.reset) {
+      var rebuilt = rebuildRenderer();
+      applyQualityToSun(settings);
+      if (Game.mazeView && typeof Game.mazeView.applyQuality === 'function') {
+        Game.mazeView.applyQuality(settings.quality);
+      }
+      // 阴影与画质同口径：低画质既不接收也不投射；切回中/高档时恢复。
+      // （applyQuality 同档会直接 return，所以 reset 场景下也要在这里兜一次。）
+      if (Game.mazeView && Game.mazeView.walls) {
+        var wallsShadow = !!settings.shadows && settings.quality !== 'low';
+        Game.mazeView.walls.castShadow = wallsShadow;
+        Game.mazeView.walls.receiveShadow = wallsShadow;
+      }
       applyPixelRatio();
       onResize();
-      // 抗锯齿等渲染器参数在创建时固定，运行时切换画质无法完全生效（明确提示）
-      if (evt.key === 'quality' && Game.state === 'playing') {
-        MG.UI.toast('画质切换后建议重开一局以完全生效', 2500);
+      if (evt.key === 'quality') {
+        var qname = qualityLabel(settings.quality);
+        MG.UI.toast(rebuilt
+          ? ('画质已切换为「' + qname + '」，立即生效')
+          : ('画质已切换为「' + qname + '」，但渲染器重建失败，请刷新页面'), 2400);
       }
     }
 

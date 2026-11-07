@@ -472,24 +472,12 @@ if (farCell) {
     this.walls = inst;
     this.group.add(inst);
 
-    // 外墙加高一点 + 暖色边缘光（用一层简单 Box 表示"墙檐"）
-    // 出于性能考虑仅在非低画质时添加
-    if (this.quality !== 'low') {
-      var capMat = new THREE.MeshBasicMaterial({
-        color: t.accent, transparent: true, opacity: 0.10, depthWrite: false
-      });
-      var capGeo = new THREE.BoxGeometry(CELL, 0.08, CELL);
-      var cap = new THREE.InstancedMesh(capGeo, capMat, wallPositions.length);
-      for (var k = 0; k < wallPositions.length; k++) {
-        var pp = wallPositions[k];
-        var ww = cellToWorld(pp[0], pp[1], maze);
-        m4.makeTranslation(ww.x, diff.wallHeight - 0.04, ww.z);
-        cap.setMatrixAt(k, m4);
-      }
-      cap.instanceMatrix.needsUpdate = true;
-      this.group.add(cap);
-      this.caps = cap;
-    }
+    // 墙位缓存：applyQuality() 换档时重建墙檐要用（BUG-033）
+    this.wallPositions = wallPositions;
+
+    // 外墙顶部的暖色边条（"墙檐"）：低画质不生成，中/高画质有；
+    // 运行时可增删，见 buildCaps() / applyQuality()
+    this.buildCaps();
 
     /* ---------- 起点标记（绿色光点） ---------- */
     var sWorld = cellToWorld(maze.start.x, maze.start.y, maze);
@@ -560,29 +548,8 @@ if (farCell) {
     portalGroup.add(endLight);
     this.endLight = endLight;
 
-    // 粒子（Points）
-    var pCount = this.quality === 'low' ? 60 : (this.quality === 'high' ? 220 : 140);
-    var pGeo = new THREE.BufferGeometry();
-    var pos = new Float32Array(pCount * 3);
-    this.pBaseY = new Float32Array(pCount);
-    this.pSpeed = new Float32Array(pCount);
-    for (var pi = 0; pi < pCount; pi++) {
-      var ang = Math.random() * Math.PI * 2;
-      var rad = Math.random() * CELL * 0.45;
-      pos[pi * 3] = Math.cos(ang) * rad;
-      pos[pi * 3 + 1] = Math.random() * diff.wallHeight;
-      pos[pi * 3 + 2] = Math.sin(ang) * rad;
-      this.pBaseY[pi] = pos[pi * 3 + 1];
-      this.pSpeed[pi] = 0.3 + Math.random() * 0.9;
-    }
-    pGeo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-    var pMat = new THREE.PointsMaterial({
-      color: endColor, size: 0.13, transparent: true, opacity: 0.9,
-      depthWrite: false, blending: THREE.AdditiveBlending, sizeAttenuation: true
-    });
-    var points = new THREE.Points(pGeo, pMat);
-    portalGroup.add(points);
-    this.particles = points;
+    // 粒子（Points）：数量随画质变化，applyQuality() 会就地重建这一组（BUG-033）
+    this.buildParticles(portalGroup);
 
     this.group.add(portalGroup);
     this.portal = portalGroup;
@@ -668,6 +635,114 @@ if (farCell) {
 
     // 色盲友好模式：仅在开启时创建文字标识 Sprite（关闭时不产生任何额外开销）
     if (this.settings.colorblind) this.setColorblind(true);
+  };
+
+  /**
+   * 墙檐（外墙顶部的暖色边条）。低画质不生成。
+   * 抽成独立方法是为了让 applyQuality() 能就地增删，不必重建整个迷宫（BUG-033）。
+   */
+  MazeView.prototype.buildCaps = function () {
+    var old = this.caps;
+    if (old) {
+      if (old.parent) old.parent.remove(old);
+      if (old.geometry) old.geometry.dispose();
+      if (old.material) old.material.dispose();
+      this.caps = null;
+    }
+    if (this.quality === 'low') return;
+    var wp = this.wallPositions;
+    if (!wp || !wp.length) return;
+    var t = this.theme;
+    var diff = this.diff;
+    var maze = this.maze;
+    var capMat = new THREE.MeshBasicMaterial({
+      color: t.accent, transparent: true, opacity: 0.10, depthWrite: false
+    });
+    var capGeo = new THREE.BoxGeometry(CELL, 0.08, CELL);
+    var cap = new THREE.InstancedMesh(capGeo, capMat, wp.length);
+    var mat4 = new THREE.Matrix4();
+    for (var k = 0; k < wp.length; k++) {
+      var pp = wp[k];
+      var ww = cellToWorld(pp[0], pp[1], maze);
+      mat4.makeTranslation(ww.x, diff.wallHeight - 0.04, ww.z);
+      cap.setMatrixAt(k, mat4);
+    }
+    cap.instanceMatrix.needsUpdate = true;
+    this.group.add(cap);
+    this.caps = cap;
+  };
+
+  /**
+   * 终点粒子。数量按画质分三档（低 60 / 中 140 / 高 220）。
+   * 重建时同时换掉 pBaseY / pSpeed，保证 update() 里按下标写入不会越界（BUG-033）。
+   * @param {THREE.Object3D} [portalGroup] 挂载目标，默认用 this.portal
+   */
+  MazeView.prototype.buildParticles = function (portalGroup) {
+    var host = portalGroup || this.portal;
+    var old = this.particles;
+    if (old) {
+      if (old.parent) old.parent.remove(old);
+      if (old.geometry) old.geometry.dispose();
+      if (old.material) old.material.dispose();
+      this.particles = null;
+    }
+    if (!host) return;
+    var diff = this.diff;
+    var endColor = 0xb27dff;
+    var pCount = this.quality === 'low' ? 60 : (this.quality === 'high' ? 220 : 140);
+    var pGeo = new THREE.BufferGeometry();
+    var pos = new Float32Array(pCount * 3);
+    this.pBaseY = new Float32Array(pCount);
+    this.pSpeed = new Float32Array(pCount);
+    for (var pi = 0; pi < pCount; pi++) {
+      var ang = Math.random() * Math.PI * 2;
+      var rad = Math.random() * CELL * 0.45;
+      pos[pi * 3] = Math.cos(ang) * rad;
+      pos[pi * 3 + 1] = Math.random() * diff.wallHeight;
+      pos[pi * 3 + 2] = Math.sin(ang) * rad;
+      this.pBaseY[pi] = pos[pi * 3 + 1];
+      this.pSpeed[pi] = 0.3 + Math.random() * 0.9;
+    }
+    pGeo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    var pMat = new THREE.PointsMaterial({
+      color: endColor, size: 0.13, transparent: true, opacity: 0.9,
+      depthWrite: false, blending: THREE.AdditiveBlending, sizeAttenuation: true
+    });
+    var points = new THREE.Points(pGeo, pMat);
+    host.add(points);
+    this.particles = points;
+  };
+
+  /**
+   * 运行时换画质（BUG-033）。
+   *
+   * 只换"与画质有关、且能安全就地替换"的三样：
+   *   1. 墙檐   —— 低画质无、中/高画质有
+   *   2. 终点粒子 —— 60 / 140 / 220
+   *   3. 地面 / 墙体 / 天花板的 receiveShadow —— 低画质不接收阴影
+   * 金币、地图卷轴、墙体实例、玩家位置等**一律不动**。
+   * 特别说明：不能用"新建一个 MazeView"来换档——pickCoinSpots 会再消费一次
+   * maze.rng，金币位置全变，等于中途换了一张地图，还会让玩家重复捡币。
+   * 抗锯齿（antialias）与像素比属于渲染器参数，由 main.js 重建渲染器负责。
+   *
+   * @param {string} q low | mid | high
+   * @returns {boolean} 是否真的换了档（同档直接返回 false）
+   */
+  MazeView.prototype.applyQuality = function (q) {
+    q = (q === 'low' || q === 'high') ? q : 'mid';
+    if (q === this.quality) return false;
+    this.quality = q;
+    this.buildCaps();
+    this.buildParticles(this.portal);
+    // 阴影接收/投射都跟"总开关 + 是否低画质"走，与 build() 里的 needShadows 同口径
+    var receive = !!this.settings.shadows && q !== 'low';
+    if (this.floor) this.floor.receiveShadow = receive;
+    if (this.walls) {
+      this.walls.receiveShadow = receive;
+      this.walls.castShadow = receive;
+    }
+    if (this.ceiling) this.ceiling.receiveShadow = receive;
+    return true;
   };
 
   /**

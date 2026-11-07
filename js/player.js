@@ -304,7 +304,7 @@
    * @param {Object} [opts] { kind: 'best'|'fast', limit: number|null, ribbon: boolean }
    *   - kind：寻路类型（best=最佳路径 / fast=最快路径）
    *   - limit：本次最大行走格数（null 或不传 = 不限制）
-   *   - ribbon：是否显示路径光带（默认 true；最快路径传 false）
+   *   - ribbon：是否显示路径光带（默认 true；当前调用方 best / fast 都传 true）
    * @returns {boolean}
    */
   Player.prototype.startAutoPath = function (worldPath, opts) {
@@ -541,6 +541,10 @@
     }
     if (this.pathGroup) {
       this.pathGroup.traverse(function (o) {
+        // 光带的采样点是一个 InstancedMesh：instanceMatrix 挂在网格自己身上，
+        // geometry.dispose() 清不掉它，只有网格派发 dispose 才会释放那份 GPU 缓冲。
+        // 每次自动寻路都会建一条新光带，不释放就是"每用一次漏一份"（与 BUG-040 同一回事）。
+        if (o.isInstancedMesh && typeof o.dispose === 'function') o.dispose();
         if (o.geometry) o.geometry.dispose();
         if (o.material) o.material.dispose();
       });

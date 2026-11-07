@@ -319,7 +319,8 @@
     } catch (e) {
       console.error('[game] 上下文恢复后重绘失败，改为重建渲染器', e);
       Game._ctxLost = true;
-      recreateRenderer();
+      Game._ctxRecovering = true;   // 重建期间保持"恢复中"，别让别的分支把 overlay 收掉
+      recreateRenderer(true);       // 上下文是好的，必须强制重建，否则这行等于白调
       return;
     }
     hideContextOverlay();
@@ -337,8 +338,13 @@
   /**
    * 彻底重建渲染器：换一张新画布 + 新 WebGLRenderer。
    * 场景 / 摄像机 / 迷宫 / 玩家位置都在内存里且与渲染器无关，复用即可保住本局进度。
+   *
+   * @param {boolean} [force] 强制重建：跳过"上下文其实没丢"的提前返回。
+   *   handleContextRestored() 重绘失败时会带着 true 调进来 —— 那时 gl.isContextLost()
+   *   已经是 false（restored 事件都派发过了），不加这个开关就会走进下面"已自行恢复"的
+   *   分支、什么也不做，最后退化成一帧一帧地 render 抛错、变成 fatal。
    */
-  function recreateRenderer() {
+  function recreateRenderer(force) {
     clearCtxTimers();
     if (!Game._ctxLost) return;                          // 期间已经被浏览器恢复了
     if (Game._renderStopped) {                           // 已经 fatal：不要再用 toast 覆盖错误界面
@@ -349,13 +355,16 @@
     }
     // 有些内核只恢复上下文、不派发 webglcontextrestored：这种情况不需要换画布，
     // 否则会无谓重建渲染器、dispose 旧对象、还弹一条误导性的"画面已恢复"
-    if (!isContextLostNow()) {
+    if (!force && !isContextLostNow()) {
       Game._ctxLost = false;
       Game._ctxRecovering = false;
       hideContextOverlay();
       forceRedraw();
       return;
     }
+    // 下面两条 dead 出口故意**不复位** _ctxRecovering：它会让主循环继续挂起
+    // （loopBody 开头那个早退），避免拿着一个救不回来的渲染器每帧刷错误。
+    // 玩家看到的是带「重新加载页面」按钮的提示层。
     if (!Game.scene || !Game.camera) { showContextOverlay('dead'); return; }
     var oldCanvas = MG.UI.el['game-canvas'];
     var parent = oldCanvas && oldCanvas.parentNode;
@@ -653,6 +662,17 @@
     var isSandbox = !!(MG.Dev &&
       ((typeof MG.Dev.takeSandboxFlag === 'function' && MG.Dev.takeSandboxFlag()) ||
        (typeof MG.Dev.isSandbox === 'function' && MG.Dev.isSandbox())));
+    /* 上面那句只保证了 takeSandboxFlag / isSandbox 存在，真正干活的两个方法
+       （patchDiff / prepareMaze）必须**逐个再判一次**才符合这里注释的承诺：
+       否则遇到"新的 main.js + 旧的 dev.js"（缓存/副本漂移，BUG-035 记过这种现象），
+       第 657 行直接抛 TypeError → 被 startGame 的 catch 变成 fatal，
+       而且 _renderStopped 一旦置位就只能刷新页面。
+       缺方法时退化成普通难度，让玩家至少能玩。 */
+    if (isSandbox &&
+        (typeof MG.Dev.patchDiff !== 'function' || typeof MG.Dev.prepareMaze !== 'function')) {
+      console.warn('[game] 沙盒方法缺失（dev.js 版本不一致？），本局按普通难度进行');
+      isSandbox = false;
+    }
     if (isSandbox) {
       diff = MG.Dev.patchDiff(diff);
       // HUD 与胜利结算读的都是 Game.diff（onVictory / updateHudData），
@@ -864,6 +884,9 @@
       for (var i = 0; i < leftovers.length; i++) {
         var g = leftovers[i];
         g.traverse(function (o) {
+          // InstancedMesh 的 instanceMatrix 挂在网格自己身上，geometry.dispose() 清不掉它，
+          // 必须让网格自己派发 dispose 事件才会被 WebGLAttributes 摘掉（与 BUG-040 同一回事）
+          if (o.isInstancedMesh && typeof o.dispose === 'function') o.dispose();
           if (o.geometry) o.geometry.dispose();
           if (o.material) {
             if (Array.isArray(o.material)) {

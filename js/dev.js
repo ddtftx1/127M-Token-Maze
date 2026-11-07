@@ -63,6 +63,8 @@
    * ---------------------------------------------------------- */
   var unlocked = false;           // 本会话是否已通过验证（不落盘）
   var panelOpen = false;
+  var pauseResume = false;      // 面板是从「对局/暂停」里打开的：关闭时回暂停菜单而不是主菜单
+  var opening = false;          // 正在执行 open()：期间忽略 onScreenShown 的"被顶掉"回调
   var activeTab = 'icons';
   var statusKind = '';
   var statusMsg = '';
@@ -115,6 +117,12 @@
     }, STATUS_MS);
   }
 
+  /** 让签到模块丢掉内存副本 + 刷新角标（删/清/导入存档后必须调，否则界面显示的是旧档） */
+  function resetCheckinCache() {
+    if (MG.Checkin && MG.Checkin._resetCache) MG.Checkin._resetCache();
+    if (MG.Checkin && MG.Checkin.refreshBadge) MG.Checkin.refreshBadge();
+  }
+
   function safeGet(key) {
     try { return global.localStorage.getItem(key); } catch (e) { return null; }
   }
@@ -149,25 +157,40 @@
    * ---------------------------------------------------------- */
   function copyText(text, label) {
     var done = false;
-    try {
-      if (global.navigator && global.navigator.clipboard && global.navigator.clipboard.writeText) {
-        global.navigator.clipboard.writeText(text);
-        done = true;
-      }
-    } catch (e) { done = false; }
-    if (!done) {
-      // 退路一：临时 textarea + execCommand
+    var cb = global.navigator && global.navigator.clipboard;
+    // writeText 返回 Promise：拒绝（file:// 非安全上下文、权限被拒）不会进 catch，
+    // 所以只能走 .catch / .then 的第二参数，在失败回调里再跑下面的退路
+    if (cb && typeof cb.writeText === 'function') {
       try {
-        var ta = document.createElement('textarea');
-        ta.value = text;
-        ta.style.position = 'fixed';
-        ta.style.left = '-9999px';
-        document.body.appendChild(ta);
-        ta.select();
-        done = document.execCommand && document.execCommand('copy');
-        document.body.removeChild(ta);
-      } catch (e2) { done = false; }
+        var pr = cb.writeText(text);
+        if (pr && typeof pr.then === 'function') {
+          pr.then(function () {
+            setStatus('ok', '已复制：' + (label || '内容'));
+          }, function () {
+            copyFallback(text, label);   // 异步失败 → 走后两步同步退路
+          });
+          return;                          // 结果由上面的回调决定，不再往下走
+        }
+        done = true;                       // 极老的实现可能返回 undefined：按成功处理
+      } catch (e) { done = false; }
     }
+    if (!done) copyFallback(text, label);
+  }
+
+  /** 剪贴板不可用时的两级退路：execCommand → 可选中的文本框 */
+  function copyFallback(text, label) {
+    var done = false;
+    // 退路一：临时 textarea + execCommand
+    try {
+      var ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.left = '-9999px';
+      document.body.appendChild(ta);
+      ta.select();
+      done = document.execCommand && document.execCommand('copy');
+      document.body.removeChild(ta);
+    } catch (e2) { done = false; }
     if (done) {
       setStatus('ok', '已复制：' + (label || '内容'));
     } else {
@@ -190,13 +213,20 @@
   function muteAudio() {
     if (audioBackup || !MG.Audio) return;
     var backup = {};
+    // 先把原始方法全部记下来，**再**统一替换。
+    // 反过来的话，一旦某个属性赋值抛错（'use strict' 下对只读属性赋值会抛 TypeError），
+    // open() 的 catch 会调 unmuteAudio()，而那时 audioBackup 还是 null → 已替换掉的方法找不回来，
+    // 本会话音效就永久哑了。
     for (var k in MG.Audio) {
       if (!Object.prototype.hasOwnProperty.call(MG.Audio, k)) continue;
       if (typeof MG.Audio[k] !== 'function') continue;
       backup[k] = MG.Audio[k];
-      MG.Audio[k] = function () { };
     }
     audioBackup = backup;
+    for (var k2 in backup) {
+      if (!Object.prototype.hasOwnProperty.call(backup, k2)) continue;
+      try { MG.Audio[k2] = function () { }; } catch (e) { /* 只读属性：跳过，不影响其余 */ }
+    }
   }
 
   function unmuteAudio() {
@@ -320,19 +350,38 @@
     if (!unlocked) { setStatus('err', '未通过验证'); return; }
     if (!els['dev-screen']) return;
     panelOpen = true;
-    if (MG.UI && MG.UI.hideAllScreens) MG.UI.hideAllScreens();
-    if (MG.UI && MG.UI.show) MG.UI.show('dev-screen');
+    opening = true;
+    /* opening 用 try/finally 收口：中途任何一步抛错（比如某个 DOM 方法异常）
+       都必须把 opening 复位，否则 onScreenShown 会被**永久**屏蔽，
+       "面板被顶掉后不还原音频"那个 bug 就又回来了。 */
     try {
-      renderTabs();
-      renderBody();
-      if (activeTab === 'env') startFps();
-      // 静音放在"面板已显示且渲染成功"之后：渲染一旦抛错，玩家不会落到
-      // "面板没出来、声音却没了"的处境（只能刷新页面才能恢复）
-      muteAudio();
-    } catch (e) {
-      console.error('[dev] 面板渲染失败', e);
-      unmuteAudio();                       // 兜底：任何异常都立刻还原音频
-      setStatus('err', '面板渲染出错，声音已还原');
+      /* BUG-036：从 HUD 入口在对局中打开时**必须先暂停**。
+         否则面板背后这一局还在跑：WASD 继续移动角色、计时继续走，
+         甚至走到终点会在主菜单上弹出胜利结算并写排行榜/回放/钱包（等于凭空刷一局成绩）。
+         把"暂停"复用既有的 pauseGame（MG.UI.hudCallbacks.onPause），不新增引擎侧接口。 */
+      pauseResume = false;
+      if (MG.Game && MG.Game.state === 'playing') {
+        pauseResume = true;
+        if (MG.UI && MG.UI.hudCallbacks && MG.UI.hudCallbacks.onPause) MG.UI.hudCallbacks.onPause(false);
+      } else if (MG.Game && MG.Game.state === 'paused') {
+        pauseResume = true;   // 本来就是暂停态：关面板时回到暂停菜单
+      }
+      if (MG.UI && MG.UI.hideAllScreens) MG.UI.hideAllScreens();
+      if (MG.UI && MG.UI.show) MG.UI.show('dev-screen');
+      try {
+        renderTabs();
+        renderBody();
+        if (activeTab === 'env') startFps();
+        // 静音放在"面板已显示且渲染成功"之后：渲染一旦抛错，玩家不会落到
+        // "面板没出来、声音却没了"的处境（只能刷新页面才能恢复）
+        muteAudio();
+      } catch (e) {
+        console.error('[dev] 面板渲染失败', e);
+        unmuteAudio();                     // 兜底：任何异常都立刻还原音频
+        setStatus('err', '面板渲染出错，声音已还原');
+      }
+    } finally {
+      opening = false;
     }
   }
 
@@ -352,7 +401,13 @@
     if (MG.UI && MG.UI.hide) MG.UI.hide('dev-screen');
     var node = $('dev-screen');
     if (node && node.classList) node.classList.add('hidden');
-    if (silent) return;
+    if (silent) { pauseResume = false; return; }
+    if (pauseResume) {
+      pauseResume = false;
+      // 从对局里进来的：回到暂停菜单，让玩家自己选「继续游戏 / 返回主菜单」。
+      // 直接 showMainMenu 会把这一局留在 state==='playing' 的僵尸态（见 open() 的注释）。
+      if (MG.UI && MG.UI.showPause) { MG.UI.showPause(); return; }
+    }
     if (MG.UI && MG.UI.showMainMenu) MG.UI.showMainMenu();
   }
 
@@ -1156,8 +1211,13 @@
       return;
     }
     if (act === 'del-key') {
-      if (safeDel(arg)) { setStatus('ok', '已删除 ' + arg); renderBody(); }
-      else setStatus('err', '删除失败');
+      if (safeDel(arg)) {
+        // 签到模块会缓存内存副本：key 删掉后它的 load() 会走"存储不可用"分支拿旧档，
+        // 表现为"已删除但角标还是今日已签到"。删到签到 key 就同步清缓存。
+        if (arg === CHECKIN_KEY) resetCheckinCache();
+        setStatus('ok', '已删除 ' + arg);
+        renderBody();
+      } else setStatus('err', '删除失败');
       return;
     }
     if (act === 'wipe-all') {
@@ -1165,6 +1225,7 @@
       for (var m = 0; m < keys.length; m++) {
         if (keys[m].indexOf('maze3d.') === 0 && safeDel(keys[m])) n++;
       }
+      resetCheckinCache();   // 全清了，签到内存副本同样要作废
       setStatus('ok', '已清空 ' + n + ' 个存档 key（刷新页面后完全生效）');
       renderBody();
       return;
@@ -1183,15 +1244,22 @@
       if (!src || !trim(src.value)) { setStatus('err', '文本框是空的'); return; }
       var parsed;
       try { parsed = JSON.parse(src.value); } catch (e) { setStatus('err', 'JSON 解析失败：' + e.message); return; }
-      var count = 0;
-      for (var kk in parsed) {
-        if (Object.prototype.hasOwnProperty.call(parsed, kk) && typeof parsed[kk] === 'string') {
-          if (safeSet(kk, parsed[kk])) count++;
-        }
+      /* 必须是对象：JSON.parse('"abc"') 得到的是字符串，for-in 会把它枚举成 "0"/"1"/"2"，
+         于是往 localStorage 里写进几个无前缀的垃圾 key（还会出现在「存档一览」里被再次导出）。 */
+      if (!parsed || typeof parsed !== 'object' || Object.prototype.toString.call(parsed) === '[object Array]') {
+        setStatus('err', '需要一个 JSON 对象（形如 { "maze3d.xxx.v1": "..." }）');
+        return;
       }
-      if (MG.Checkin && MG.Checkin._resetCache) MG.Checkin._resetCache();
-      if (MG.Checkin && MG.Checkin.refreshBadge) MG.Checkin.refreshBadge();
-      setStatus('ok', '已导入 ' + count + ' 个 key（刷新页面后完全生效）');
+      var count = 0, skipped = 0;
+      for (var kk in parsed) {
+        if (!Object.prototype.hasOwnProperty.call(parsed, kk)) continue;
+        if (kk.indexOf('maze3d.') !== 0 || typeof parsed[kk] !== 'string') { skipped++; continue; }
+        if (safeSet(kk, parsed[kk])) count++;
+      }
+      resetCheckinCache();
+      setStatus('ok', '已导入 ' + count + ' 个 key' +
+        (skipped ? '（跳过 ' + skipped + ' 个非 maze3d.* 或非字符串项）' : '') +
+        '（刷新页面后完全生效）');
       renderBody();
       return;
     }
@@ -1413,6 +1481,19 @@
     handleItemUse: handleItemUse,
     /** 调试用：当前是否沙盒局 */
     isSandbox: function () { return sandboxActive; },
+    /**
+     * ui.js：每次 show(id) 后回调。
+     * 面板开着时如果别的界面被显示（重开一局、返回主菜单、通关…），
+     * 说明 dev-screen 被顶掉了 —— 此时必须走一遍 close()，
+     * 否则面板内静音包装过的 MG.Audio.* 永远不会还原（整场没声），且 panelOpen 卡在 true。
+     */
+    onScreenShown: function (id) {
+      /* opening 期间必须忽略：open() 会先调 pauseGame()，而 pauseGame 会 show('pause-menu')，
+         那条 show 同样会打到这个回调上 —— 不挡的话，正在打开的面板会把自己 close 掉，
+         pauseResume 也被提前清零（关闭时就回不到暂停菜单了）。 */
+      if (opening) return;
+      if (panelOpen && id && id !== 'dev-screen') close(true);
+    },
     /** ui.js：每次切换界面后补挂免密入口（幂等），防止界面 DOM 重建后入口消失（BUG-034） */
     mountQuickEntries: function () {
       if (!unlocked) return;

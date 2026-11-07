@@ -1858,13 +1858,19 @@ body[data-colorblind="1"] .item-count {
     border-radius: 10px;
     text-align: center;
   }
+  /* 横向两栏时"矮屏压一档"的页签栏宽度（从 max-height:720 块挪过来的，原因见那里） */
+  .dev-tabs { flex-basis: 104px; }
   .dev-body { flex: 1 1 auto; }
   .dev-footer { flex: 0 0 100%; }
 }
 
 /* ---------- 手机横屏矮屏：整体压一档 ---------- */
 @media (orientation: landscape) and (max-height: 720px) {
-  .dev-tabs { flex-basis: 104px; }
+  /* 注意：这里**不能**写 .dev-tabs { flex-basis: 104px }。
+     那个 104px 只服务于上面"横向两栏"（.dev-panel 是 row）的布局；
+     BUG-030 之后桌面矮屏也会命中本块，而桌面 .dev-panel 是 column，
+     flex-basis 在 column 主轴上是**高度**，会把页签行撑成 104px 高的一条。
+     已挪进上面的 (hover:none)(pointer:coarse) 块。 */
   .dev-tab { padding: 5px 8px; min-height: 30px; font-size: 12px; }
   .dev-card { padding: 8px 10px; margin-bottom: 8px; }
   .dev-log-list { max-height: 34vh; }
@@ -1924,7 +1930,6 @@ body.legacy-gap .shop-list > * + * { margin-top: 8px; }
 body.legacy-gap .item-list > * + * { margin-top: 8px; }
 body.legacy-gap .hud-stats > * + * { margin-left: 5px; }
 body.legacy-gap .hud-buttons > * + * { margin-left: 5px; }
-body.legacy-gap .sign-stats > * + * { margin-left: 14px; }
 body.legacy-gap .sign-actions > * + * { margin-left: 10px; }
 body.legacy-gap .dev-row > * + * { margin-left: 8px; }
 body.legacy-gap .dev-btn-grid > * + * { margin-left: 8px; }
@@ -1976,16 +1981,10 @@ body.legacy-gap .settings-scroll > * + * { margin-top: 10px; }
    ============================================================ */
 
 /* ---------- 第 1 档：无模糊 / 无动画 / 全局直角 / 无阴影 ---------- */
-body.sim-legacy-1 .screen,
-body.sim-legacy-1 .panel,
-body.sim-legacy-1 .toast,
-body.sim-legacy-1 .hud-top,
-body.sim-legacy-1 .hud-bottom-right,
-body.sim-legacy-1 .dev-panel {
-  -webkit-backdrop-filter: none !important;
-  backdrop-filter: none !important;
-}
-/* 通配复位：圆角 / 阴影 / 过渡 / 动画一律关掉。
+/* 通配复位：圆角 / 阴影 / 过渡 / 动画 / 毛玻璃 一律关掉。
+   注意 backdrop-filter 必须一起放进通配 —— 第一版只列举了 .screen/.panel 等 6 个选择器，
+   而 HUD 上真正带 blur(6px) 的是 .stat / .icon-btn / .compass-ring / #minimap /
+   .minimap-lock / .replay-bar，全在列举之外，结果"第 1 档"在游戏内几乎看不出变化。
    用通配而不是列举，是因为界面元素太多（输入框、select、开关、滑块、卡片、
    dev-* 控件…），列举必然漏 —— 而"漏掉一个"用户就会看到圆角。 */
 body.sim-legacy-1 *,
@@ -1994,6 +1993,8 @@ body.sim-legacy-1 *::after {
   border-radius: 0 !important;
   box-shadow: none !important;
   text-shadow: none !important;
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
   transition: none !important;
   -webkit-transition: none !important;
   animation: none !important;
@@ -2014,7 +2015,6 @@ body.sim-legacy-2 .panel {
   border-color: var(--text-dim) !important;
 }
 body.sim-legacy-2 .toast,
-body.sim-legacy-2 .hud-top,
 body.sim-legacy-2 .dev-panel {
   background-image: none !important;
   background-color: rgba(14, 20, 32, 0.98) !important;

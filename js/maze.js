@@ -436,6 +436,10 @@ if (farCell) {
       var ceil = new THREE.Mesh(floorGeo, ceilMat);
       ceil.rotation.x = Math.PI / 2;
       ceil.position.y = diff.wallHeight;
+      // 与地面 / 墙体同口径：build 时就要按当时的 shadows 设置好，
+      // 否则"开了阴影之后新开的每一关"天花板都不接收阴影，
+      // 只有再切一次画质或再拨一次阴影开关才被 applyQuality/onSettingChanged 补上
+      ceil.receiveShadow = needShadows;
       this.group.add(ceil);
       this.ceiling = ceil;
     }
@@ -645,6 +649,8 @@ if (farCell) {
     var old = this.caps;
     if (old) {
       if (old.parent) old.parent.remove(old);
+      // InstancedMesh 的 instanceMatrix 只有它自己的 dispose() 能释放（详见 MazeView.dispose 的注释）
+      if (typeof old.dispose === 'function') old.dispose();
       if (old.geometry) old.geometry.dispose();
       if (old.material) old.material.dispose();
       this.caps = null;
@@ -674,7 +680,8 @@ if (farCell) {
 
   /**
    * 终点粒子。数量按画质分三档（低 60 / 中 140 / 高 220）。
-   * 重建时同时换掉 pBaseY / pSpeed，保证 update() 里按下标写入不会越界（BUG-033）。
+   * 重建时同时换掉 pBaseY / pSpeed。update() 是用 pSpeed.length 驱动下标去写
+   * position 数组的，所以这三者长度必须始终一致（pBaseY 目前只记录初始高度，未参与动画）。
    * @param {THREE.Object3D} [portalGroup] 挂载目标，默认用 this.portal
    */
   MazeView.prototype.buildParticles = function (portalGroup) {
@@ -956,6 +963,13 @@ if (farCell) {
 
   /** 销毁场景对象，释放 GPU 资源 */
   MazeView.prototype.dispose = function () {
+    /* InstancedMesh 的 instanceMatrix 是挂在**网格自己**身上的缓冲区，
+       geometry.dispose() 只清 geometry 自带的属性，管不到它。
+       three 的实现里只有 InstancedMesh 派发 dispose 事件时才会把它从
+       WebGLAttributes 里摘掉（assets/three.module.js 的 onInstancedMeshDispose），
+       所以墙体与墙檐必须单独 dispose()，否则每开一局都会漏一份 GPU 缓冲。 */
+    if (this.walls && typeof this.walls.dispose === 'function') this.walls.dispose();
+    if (this.caps && typeof this.caps.dispose === 'function') this.caps.dispose();
     this.group.traverse(function (obj) {
       if (obj.geometry) obj.geometry.dispose();
       if (obj.material) {
@@ -972,6 +986,8 @@ if (farCell) {
     this.coins = [];
     this.mapItem = null;
     this.walls = null;
+    this.caps = null;
+    this.wallPositions = null;
     this.particles = null;
     this.startSprite = null;
     this.endSprite = null;

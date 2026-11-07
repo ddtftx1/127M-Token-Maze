@@ -183,6 +183,9 @@
       // 结构损坏（顶层是数字/字符串、或某个难度项不是对象）时按空记录处理，
       // 否则 submitRecord 里 cur.time 恒 undefined、成绩从此刻起永不更新
       if (!v || typeof v !== 'object') return {};
+      // 数组也算"不是记录表"：rec[diff] = {...} 写进数组后 JSON.stringify 会丢掉非下标键，
+      // 等于成绩静默不落盘
+      if (Object.prototype.toString.call(v) === '[object Array]') return {};
       return v;
     } catch (e) { return {}; }
   }
@@ -228,7 +231,15 @@
   function loadAchievements() {
     var raw = safeGet(ACHIEVE_KEY);
     if (!raw) return {};
-    try { return JSON.parse(raw) || {}; } catch (e) { return {}; }
+    try {
+      var a = JSON.parse(raw);
+      /* 必须真的是"普通对象"：JSON.parse('5') / '"x"' 会得到原始值，而 a || {} 只挡得住
+         null/false/0 —— 留下数字或字符串的话，后面 unlockAchievement 里的
+         a[id] = ... 在严格模式下会抛 TypeError，异常正好落在 onVictory 的
+         "金币入账之后、showWin() 之前"，表现为通关后胜利界面出不来、本局卡死。 */
+      if (!a || typeof a !== 'object' || Object.prototype.toString.call(a) === '[object Array]') return {};
+      return a;
+    } catch (e) { return {}; }
   }
   function saveAchievements(a) { safeSet(ACHIEVE_KEY, JSON.stringify(a)); }
 

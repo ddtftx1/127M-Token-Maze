@@ -20,7 +20,7 @@
    * @param {THREE.PerspectiveCamera} camera
    * @param {Object} maze 迷宫数据 {grid,size,start,end}
    * @param {Object} diff 难度配置
-   * @param {HTMLCanvasElement} canvas 用于鼠标锁定
+   * @param {HTMLCanvasElement} canvas 仅保存引用（Pointer Lock 实际由 js/input.js 负责，这里不直接使用）
    */
   function Player(camera, maze, diff, canvas) {
     this.camera = camera;
@@ -204,6 +204,12 @@
         }
         if (doneX && doneZ) break;
       }
+      /* 落地前对"合成坐标"补一次复验。
+         Z 的判定用的是"当时已经算出来的 stepX"：如果 Z 先成立（stepX 还是 0），
+         之后 X 再成立就立刻 break，那么 (x+stepX, z+stepZ) 这个真正落地的位置
+         一次都没被检测过 —— 斜向挤墙角时会轻微陷进墙体半径内（不会穿墙、不会累积）。
+         这里若整体仍然重叠，就退掉 Z 只保留 X（X 是对旧 z 验证过的，单独落地一定安全）。 */
+      if (stepX && stepZ && this.collides(this.pos.x + stepX, this.pos.z + stepZ)) stepZ = 0;
       if (stepX) { this.pos.x += stepX; moved = true; }
       if (stepZ) { this.pos.z += stepZ; moved = true; }
     }

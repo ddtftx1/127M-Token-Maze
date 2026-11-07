@@ -101,8 +101,23 @@
     }, { passive: false });
 
     /* ---------- 虚拟摇杆（触摸） ---------- */
+    /** 当前 _joyId 对应的手指是否已不在屏幕上（与 lookOwnerGone 同一套语义） */
+    function joyOwnerGone(e) {
+      if (self._joyId === null) return true;
+      var all = e.touches || [];
+      for (var i = 0; i < all.length; i++) {
+        if (all[i].identifier === self._joyId) return false;  // 仍在屏幕上
+      }
+      return true;  // 已不在屏幕：identifier 失效（切后台 / 来电丢失 touchcancel 等）
+    }
+
     this.joystickEl.addEventListener('touchstart', function (e) {
       e.preventDefault();
+      /* 已有手指在控摇杆、且它还在屏上时，不允许后来的手指抢占。
+         原来是无条件改写 _joyId 并按新触点重算基点：第二根手指（手掌边缘 / 误触）
+         落下时角色会突然停住或改向，而等它抬起 _joyId 变成 null，
+         原来那根拇指的 touchmove 就再也匹配不上 —— 摇杆"半死"，必须抬手重按。 */
+      if (!joyOwnerGone(e)) return;
       self._notifyFirstInput();
       var t = e.changedTouches[0];
       self._joyId = t.identifier;
@@ -214,6 +229,11 @@
       self._notifyFirstInput();
       var k = e.key.toLowerCase();
       self.keys[k] = true;
+      /* 移动键要在重复事件里持续为 true，所以先记状态、再挡重复。
+         下面的一次性快捷键（R/M/P/F/ESC）绝不能吃 e.repeat：
+         按住 R 不放时浏览器每 ~33ms 派发一次 keydown，
+         原来会让 restartGame → disposeLevel + buildLevel 连跑几十次（黑屏/卡死）。 */
+      if (e.repeat) return;
       // 方向键 / 空格阻止页面滚动
       if (['arrowup', 'arrowdown', 'arrowleft', 'arrowright', ' '].indexOf(k) >= 0) e.preventDefault();
 
@@ -304,6 +324,20 @@
       // 清空切换瞬间可能产生的一次性大位移，避免退出锁定时"视角跳一下"
       self.lookDX = 0;
       self.lookDY = 0;
+    });
+    /* 锁定被拒（浏览器策略 / "user has exited the lock before this request was completed"
+       / 权限拦截）时 change 事件根本不会来，原来完全没有可观测性：
+       玩家只会看到"点了没反应、也没解释"。这里复位状态并给一次节流提示。 */
+    document.addEventListener('pointerlockerror', function () {
+      self.pointerLocked = false;
+      var now = Date.now();
+      if (now - (self._plErrAt || 0) < 4000) return;
+      self._plErrAt = now;
+      if (MG.UI && MG.UI.toast) {
+        MG.UI.toast('鼠标锁定被浏览器拒绝，请再点一次画面（或按 F11 全屏后重试）', 2600);
+      } else if (global.console && console.warn) {
+        console.warn('[input] pointer lock 请求被拒绝');
+      }
     });
 
     /* ---------- 窗口尺寸变化（摇杆半径需要重算） ---------- */

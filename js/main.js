@@ -92,6 +92,8 @@
     }
 
     setupRenderer(renderer, settings);
+    // 记录"当前渲染器实际是用哪一档画质建的"，供 onSettingChanged 判断是否需要重建
+    Game._appliedQuality = settings.quality;
     // WebGL 上下文丢失 / 恢复：切后台被系统回收、GPU 进程重启等场景的兜底（BUG-029）
     bindContextLoss(canvas);
 
@@ -794,7 +796,14 @@
     // 上一局通关解锁、但玩家抢在 1.2 秒内点了「再玩一次」的成就，等开局种子 toast
     // 消失（2200ms）后再补发，避免两条 toast 互相覆盖（BUG-020）
     if (Game._pendingAchieveToast) {
-      setTimeout(function () { flushAchieveToast(); }, 2200);
+      // 登记到同一个 _achieveToastTimer 上：否则它是一个"游离"的定时器，
+      // clearAchieveToastTimer() 管不到它 —— 玩家在这 2.2 秒内退出本局的话，
+      // 成就提示会在主菜单上迟一拍弹出来。
+      if (Game._achieveToastTimer) clearTimeout(Game._achieveToastTimer);
+      Game._achieveToastTimer = setTimeout(function () {
+        Game._achieveToastTimer = null;
+        flushAchieveToast();
+      }, 2200);
     }
   }
 
@@ -1708,21 +1717,26 @@
     // 阴影
     if (evt.key === 'shadows' || evt.reset) {
       var shadowsOn = !!settings.shadows;
+      /* 阴影的最终口径是"总开关 && 不是低画质"，必须与 build() 里的 needShadows
+         以及 MazeView.applyQuality() 保持一致：只按总开关走的话，
+         低画质下把阴影开关拨开，地面/墙体/天花板又会被设成接收阴影，
+         与"低画质不接收阴影"自相矛盾。 */
+      var shadowsRecv = shadowsOn && settings.quality !== 'low';
       if (Game.renderer) {
         Game.renderer.shadowMap.enabled = shadowsOn;
       }
       if (Game.sun) Game.sun.castShadow = shadowsOn;
       if (Game.mazeView && Game.mazeView.walls) {
-        Game.mazeView.walls.castShadow = shadowsOn;
-        Game.mazeView.walls.receiveShadow = shadowsOn;
+        Game.mazeView.walls.castShadow = shadowsRecv;
+        Game.mazeView.walls.receiveShadow = shadowsRecv;
       }
-      // 地面 / 天花板是在 build() 时按当时的 shadows 设置写死 receiveShadow 的，
-      // 运行时再打开阴影就收不到影子（看起来"开了阴影但没有影子"），这里同步一次
+      // 地面 / 天花板在 build() 时按当时的 shadows 写死 receiveShadow；
+      // 运行时再拨开关要同步一次，否则表现为"开了阴影但没有影子"
       if (Game.mazeView && Game.mazeView.floor) {
-        Game.mazeView.floor.receiveShadow = shadowsOn;
+        Game.mazeView.floor.receiveShadow = shadowsRecv;
       }
       if (Game.mazeView && Game.mazeView.ceiling) {
-        Game.mazeView.ceiling.receiveShadow = shadowsOn;
+        Game.mazeView.ceiling.receiveShadow = shadowsRecv;
       }
       // 只标记"与阴影相关"的网格材质需要重编译（限定在迷宫组内的受光材质），
       // 避免全场景 traverse needsUpdate 触发全量着色器重编译导致卡顿
@@ -1746,26 +1760,33 @@
      * 现在切档时：① 换画布重建渲染器（抗锯齿真正换掉）；② 太阳强度与阴影贴图尺寸换档；
      * ③ MazeView 就地换墙檐 / 粒子 / 阴影接收。三档在桌面上都立刻可见。 */
     if (evt.key === 'quality' || evt.reset) {
-      var rebuilt = rebuildRenderer();
-      applyQualityToSun(settings);
-      if (Game.mazeView && typeof Game.mazeView.applyQuality === 'function') {
-        Game.mazeView.applyQuality(settings.quality);
-      }
-      // 阴影与画质同口径：低画质既不接收也不投射；切回中/高档时恢复。
-      // （applyQuality 同档会直接 return，所以 reset 场景下也要在这里兜一次。）
-      if (Game.mazeView && Game.mazeView.walls) {
-        var wallsShadow = !!settings.shadows && settings.quality !== 'low';
-        Game.mazeView.walls.castShadow = wallsShadow;
-        Game.mazeView.walls.receiveShadow = wallsShadow;
+      /* 只有"档位真的变了"才重建渲染器。
+       * 原因：MG.Settings.set() 无论值有没有变都会广播（js/settings.js 的 setSetting 末尾
+       * 无条件 emit），而「恢复默认」走的是 reset 广播 —— 不判断的话，重复点同一档画质、
+       * 或每次点恢复默认，都会白白丢掉一次 WebGL 上下文再建一个，白白卡顿一下。 */
+      if (Game._appliedQuality !== settings.quality) {
+        var rebuilt = rebuildRenderer();
+        // 重建成功才记账：失败时保持旧值，等玩家下次再切档（或内存腾出来）时有重试机会
+        if (rebuilt) Game._appliedQuality = settings.quality;
+        applyQualityToSun(settings);
+        if (Game.mazeView && typeof Game.mazeView.applyQuality === 'function') {
+          Game.mazeView.applyQuality(settings.quality);
+        }
+        // 阴影与画质同口径：低画质既不接收也不投射；切回中/高档时恢复
+        if (Game.mazeView && Game.mazeView.walls) {
+          var wallsShadow = !!settings.shadows && settings.quality !== 'low';
+          Game.mazeView.walls.castShadow = wallsShadow;
+          Game.mazeView.walls.receiveShadow = wallsShadow;
+        }
+        if (evt.key === 'quality') {
+          var qname = qualityLabel(settings.quality);
+          MG.UI.toast(rebuilt
+            ? ('画质已切换为「' + qname + '」，立即生效')
+            : ('画质已切换为「' + qname + '」，但渲染器重建失败，请刷新页面'), 2400);
+        }
       }
       applyPixelRatio();
       onResize();
-      if (evt.key === 'quality') {
-        var qname = qualityLabel(settings.quality);
-        MG.UI.toast(rebuilt
-          ? ('画质已切换为「' + qname + '」，立即生效')
-          : ('画质已切换为「' + qname + '」，但渲染器重建失败，请刷新页面'), 2400);
-      }
     }
 
     // 音量 / 音效

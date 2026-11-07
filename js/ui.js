@@ -23,8 +23,14 @@
 
   /**
    * 小地图离屏缓存：相对静态内容（背景 / 已探索通路 / 已探索墙 / 金币 / 起点）
-   * 画一次后整张贴到主画布，每帧只重绘动态元素（玩家 / 终点呼吸光 / 寻路路径 / 边框）。
-   * 困难难度 31×31 = 961 格 × 2 次遍历，原先每 120ms 全量重扫一遍，低端机掉帧。
+   * 画好后整张贴到主画布，每帧只重绘动态元素（玩家 / 终点呼吸光 / 寻路路径 / 边框）。
+   *
+   * 缓存什么时候失效（不是"只画一次"）：
+   *   a) 难度 / 主题 / 色盲 / 金币显示设置 / 剩余金币数 变化（签名比对）；
+   *   b) 玩家跨格，或探索标记数量变化。
+   * 困难难度 31×31 = 961 格 × 2 次遍历，原先每 120ms 全量重扫一遍。
+   * 注：b) 里的"玩家跨格"这条其实比"探索区域变化"更宽 —— 走过已探索的格子也会置脏，
+   * 所以行走时仍会有全量重扫（约每秒 2~3 次），只是不再随 120ms 的绘制节奏跑。
    */
   var mapCacheCanvas = null;
   var mapCacheCtx = null;
@@ -282,6 +288,9 @@
     if (MG.Dev && MG.Dev.isUnlocked && MG.Dev.isUnlocked() && MG.Dev.mountQuickEntries) {
       MG.Dev.mountQuickEntries();
     }
+    /* 面板开着时若有别的界面被显示，说明 dev-screen 被顶掉了：
+       让开发者面板自己收尾（还原音频、清定时器），否则会整场静音。 */
+    if (MG.Dev && MG.Dev.onScreenShown) MG.Dev.onScreenShown(id);
   }
   function hide(id) {
     var node = document.getElementById(id);
@@ -417,15 +426,15 @@
     // 随机种子
     if (el['btn-seed-random']) {
       el['btn-seed-random'].addEventListener('click', function () {
-        el['seed-input'].value = MG.Maze.randomSeed();
+        if (el['seed-input']) el['seed-input'].value = MG.Maze.randomSeed();
         playClick();
       });
     }
     // 复制种子
     if (el['btn-seed-copy']) {
       el['btn-seed-copy'].addEventListener('click', function () {
-        var v = el['seed-input'].value || '（空）';
-        copyText(el['seed-input'].value || '');
+        var v = (el['seed-input'] && el['seed-input'].value) || '（空）';
+        copyText((el['seed-input'] && el['seed-input'].value) || '');
         toast('已复制种子：' + v);
         playClick();
       });
@@ -434,7 +443,7 @@
     if (el['btn-daily']) {
       el['btn-daily'].addEventListener('click', function () {
         var seed = MG.Maze.dailySeed();
-        el['seed-input'].value = seed;
+        if (el['seed-input']) el['seed-input'].value = seed;
         toast('每日挑战种子：' + seed);
         playClick();
         // 直接开始
@@ -446,7 +455,7 @@
     if (el['btn-start']) {
       el['btn-start'].addEventListener('click', function () {
         playClick();
-        var seed = (el['seed-input'].value || '').trim();
+        var seed = ((el['seed-input'] && el['seed-input'].value) || '').trim();
         if (menuCallbacks.onStart) menuCallbacks.onStart(selectedDiff, seed, false);
       });
     }
@@ -1579,9 +1588,13 @@
     /* ---------- 1) 缓存失效判定 ---------- */
     var pgd = player.getGrid();
     var exploredCount = countExplored(player.explored, size * size);
-    // 静态内容签名：难度（size）/ 主题配色 / 色盲模式 / 金币显示设置 任一变化都要重绘缓存
+    /* 静态内容签名：难度（size）/ 主题配色 / 色盲模式 / 金币显示设置 / 剩余金币数
+       任一变化都要重绘缓存。剩余金币数必须算进来：金币是画在离屏静态层上的，
+       而"道具面板生成金币"这类操作可以在玩家**不跨格**的情况下改变金币集合 ——
+       只靠下面的跨格/探索计数判定，小地图要等走到下一格才显示新金币。 */
+    var remainCoins = (typeof mazeView.remainCoins === 'function') ? mazeView.remainCoins() : 0;
     var signature = size + '|' + (settings.theme || '') + '|' + (cb ? 1 : 0) + '|' +
-      (settings.minimapCoins ? 1 : 0) + '|' + mapSize;
+      (settings.minimapCoins ? 1 : 0) + '|' + mapSize + '|' + remainCoins;
     if (signature !== mapCacheSignature) {
       mapCacheSignature = signature;
       mapCacheDirty = true;
@@ -1704,9 +1717,13 @@
     var keys = ['simple', 'medium', 'hard'];
     for (var i = 0; i < keys.length; i++) {
       var r = rec[keys[i]];
-      if (r) {
+      /* 只认"对象且步数是有限数"的条目：
+         ① 存档可能被外部改写（导出/导入、手改 localStorage），steps 里塞 HTML 会在
+            每次进主菜单时被 innerHTML 执行 —— 排行榜那侧早就做了 escapeHtml，这里是唯一漏网的；
+         ② 结构不对时渲染成 'undefined 步' 也不好看。 */
+      if (r && typeof r === 'object' && isFinite(r.steps)) {
         html += '<li><span>' + DIFF_NAMES[keys[i]] + '</span><b>' +
-          formatTime(r.time) + ' · ' + r.steps + ' 步</b></li>';
+          formatTime(r.time) + ' · ' + escapeHtml(r.steps) + ' 步</b></li>';
       } else {
         html += '<li><span>' + DIFF_NAMES[keys[i]] + '</span><b>—</b></li>';
       }
@@ -1767,6 +1784,7 @@
        ③ 只有 fullscreenchange 才算成功，另有 900ms 兜底（老内核既无 promise、
           也可能不派发事件）。 */
   var fsStateKnown = null;   // 上一次已知的全屏状态，用于给重复事件去重
+  var fsToggleSeq = 0;       // 每次请求全屏/退出全屏自增，用来作废过期的兜底定时器
 
   function fullscreenElement() {
     var doc = document;
@@ -1794,20 +1812,23 @@
     var elem = doc.documentElement;
     bindFullscreenChange();
 
-    var before = !!fullscreenElement();
+    var wantFull = !fullscreenElement();   // 本次请求的**目标状态**
+    var seq = ++fsToggleSeq;
     var settled = false;
 
     function fail(err) {
       if (settled) return;
       settled = true;
       var why = err ? String(err.message || err.name || '') : '';
-      var head = before ? '退出全屏失败' : '进入全屏失败';
-      toast(why ? (head + '：' + why) : (head + '，请按 F11'), 2600);
+      var head = wantFull ? '进入全屏失败' : '退出全屏失败';
+      // 退出方向给 F11 是误导（element 全屏下 F11 通常不生效），按方向给不同兜底
+      var tip = wantFull ? '，可先点一下页面再试，或按 F11' : '，可再点一次按钮或按 ESC';
+      toast(why ? (head + '：' + why) : (head + tip), 2600);
     }
 
     try {
       var ret;
-      if (!before) {
+      if (wantFull) {
         var reqFn = elem.requestFullscreen || elem.webkitRequestFullscreen;
         if (!reqFn) { toast('当前浏览器不支持全屏', 2600); return; }
         ret = reqFn.call(elem);
@@ -1824,8 +1845,12 @@
 
     setTimeout(function () {
       if (settled) return;
-      if (!!fullscreenElement() === before) fail(null);   // 状态没变 = 没生效
-      else settled = true;
+      /* 过期作废：900ms 内又点了一次（或按 ESC 退出了），判定依据已经不成立。
+         原实现看的是"当前状态 == 请求前状态"，双击时先进后出正好回到原状态，
+         于是**在两次都成功之后**弹一句"进入全屏失败"。 */
+      if (seq !== fsToggleSeq) return;
+      if (!!fullscreenElement() === wantFull) settled = true;
+      else fail(null);
     }, 900);
   }
 

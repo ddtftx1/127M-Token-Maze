@@ -3,7 +3,7 @@
  * 每日签到（MG.Checkin）
  *
  * 设计要点（详见设计任务书「签到功能设计.md」，该文档不入库）：
- * - 数据独立：新 localStorage key `maze3d.checkin.v1`，**不动** `maze3d.wallet.v1`
+ * - 数据独立：新 localStorage key 为 maze3d.checkin.v1，**不动** maze3d.wallet.v1
  * - 奖励入账：金币走 MG.Shop.addCoins、道具走 MG.Shop.addItem，与商店购买 / 迷宫拾取共用同一份钱包
  * - 日期口径：直接复用 MG.Maze.dailySeed()，与「每日挑战」永不漂移；本地 00:00 重置
  * - 断签：连签清零回第 1 天；漏签 1~5 天且有「签到护符」时自动消耗 1 个保住连签
@@ -438,7 +438,13 @@
     var itemsOk = [];
     if (MG.Shop) {
       if (reward.coins > 0 && MG.Shop.addCoins) {
-        try { MG.Shop.addCoins(reward.coins); } catch (e) { coinsOk = false; }
+        try {
+          MG.Shop.addCoins(reward.coins);
+          /* addCoins 内部会把 saveWallet() 的返回值吞掉、也不会抛错，
+             所以"钱包写盘失败"在这里必须自己补一次判定，否则 coinsOk 永远是 true，
+             玩家会落到"签到记上了、金币却没进存档"的无提示状态。 */
+          if (MG.Shop.saveWallet && MG.Shop.saveWallet() === false) coinsOk = false;
+        } catch (e) { coinsOk = false; }
       }
       for (var i = 0; i < reward.items.length; i++) {
         // 单个道具发放失败不中断（并发/写盘异常都可能抛），失败项记为 false 由上层提示
@@ -447,9 +453,15 @@
       }
     }
 
-    // ④ 反馈
+    // ④ 反馈（写盘类失败要如实告诉玩家，不能一律报"领取成功"）
+    var badItems = 0;
+    for (var bi = 0; bi < itemsOk.length; bi++) { if (itemsOk[bi] === false) badItems++; }
+    var warn = '';
+    if (!saved) warn += '；签到记录未能写入存档（存储空间不足？）';
+    if (!coinsOk) warn += '；金币未能入账';
+    if (badItems > 0) warn += '；' + badItems + ' 件道具未能发放';
     play(reward.special === 'lucky' ? 'purchase' : 'coin');
-    uiToast(claimMessage(reward, plan, shieldLeft), 2800, true);
+    uiToast(claimMessage(reward, plan, shieldLeft) + warn, warn ? 3600 : 2800, true);
     syncView();
     refreshBadge();
     if (panelOpen) renderPanel();
@@ -682,6 +694,15 @@
   function bindMiniCountdown() {
     if (tickTimer) { clearInterval(tickTimer); tickTimer = null; }
     tickTimer = setInterval(function () {
+      /* 面板可能被别的界面顶掉（开发者入口、重开一局、返回主菜单都会走 hideAllScreens，
+         而签到屏并没有"被隐藏时收尾"的钩子）：这种情况必须自愈，
+         否则这个 1 秒定时器会一直空转，每秒读一次存档并写已经隐藏的 DOM。 */
+      var scr = els['checkin-screen'];
+      if (scr && scr.classList && scr.classList.contains('hidden')) {
+        panelOpen = false;
+        if (tickTimer) { clearInterval(tickTimer); tickTimer = null; }
+        return;
+      }
       // 跨天时重新摇一次奖励并重绘
       if (view && view.day !== dayKey()) {
         syncView();
@@ -852,7 +873,15 @@
     /** 测试专用：注入随机源（传 null 恢复 Math.random） */
     _setRng: function (fn) { rng = (typeof fn === 'function') ? fn : Math.random; },
     /** 测试专用：清掉内存副本，强制下次从 localStorage 重读 */
-    _resetCache: function () { cache = null; view = null; }
+    _resetCache: function () {
+      cache = null;
+      view = null;
+      /* degraded 的语义是"本会话写过盘失败，磁盘是旧的，以内存为准"。
+         既然要"清掉内存副本、重新以磁盘为准"，这个标记就必须一起清 ——
+         否则 load() 仍不读盘，反而把刚清空的 cache 当成真相
+         （表现为：面板显示"从未签到"，一领取就以空档覆盖磁盘、连签全丢还白拿首签）。 */
+      degraded = false;
+    }
   };
 
 })(window);

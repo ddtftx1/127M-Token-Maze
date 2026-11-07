@@ -34,7 +34,7 @@
 | `_模板.md` | 新版本日志的**空白模板**。发新版时复制一份作为新的根 `CHANGELOG.md` 续写。 |
 | `.gitignore` | 排除本地开发素材与任务书（见下）。 |
 
-> **本地开发素材（不入库）**：`svg/`（18 个图标源文件）与各轮任务书
+> **本地开发素材（不入库）**：`svg/`（19 个图标源文件）与各轮任务书
 > （`*修改要求.md` / `*修复要求.txt`）只供开发时参考，已由 `.gitignore` 排除，克隆仓库不会包含它们。
 
 ### `css/`
@@ -56,7 +56,7 @@
 
 | 路径 | 作用 | 导出 |
 |------|------|------|
-| `js/icons.js` | **图标库（最先加载）**。18 个 Noto Emoji 彩色 SVG 的内联字符串，挂在 `MG.Icons.svg`；同时提供 `MG.Icons.get(name)` 兜底取值。内联而非引用文件，是因为 `file://` 下 `fetch` 本地 svg 会触发 CORS。 | `MG.Icons` |
+| `js/icons.js` | **图标库（最先加载）**。19 个 Noto Emoji 彩色 SVG 的内联字符串，挂在 `MG.Icons.svg`；同时提供 `MG.Icons.get(name)` 兜底取值。内联而非引用文件，是因为 `file://` 下 `fetch` 本地 svg 会触发 CORS。 | `MG.Icons` |
 | `js/settings.js` | 设置管理。默认值定义、`localStorage` 读写、设置变更广播，供主循环与 UI 实时响应。同时负责最佳记录（key `maze3d.records.v1`）与成就（key `maze3d.achievements.v1`）的存取。设置自身 key 为 `maze3d.settings.v1`。 | `MG.Settings` |
 | `js/audio.js` | 音效模块。纯 WebAudio 程序化合成，不含任何音频文件；含按钮、脚步、胜利、寻路、金币、错误等音效，首次交互后解锁 `AudioContext`。 | `MG.Audio` |
 | `js/maze.js` | 迷宫模块。难度参数表、可复现随机数（种子 / 每日挑战）、DFS 递归回溯与 Prim 两种生成算法、环路打通、起终点选取、地图卷轴取位，以及把迷宫数据构建为 Three.js 场景的 `MazeView`（墙体 / 地面 / 天花板 / 金币 / 卷轴 / 粒子 / 主题换色 / 资源释放）。 | `MG.Maze` |
@@ -86,7 +86,7 @@
 
 ### `svg/` —— 图标源文件（**本地素材，不入库**）
 
-18 个 Noto Emoji 彩色 SVG（中文文件名 / Unicode 码位命名，按用途命名），是 UI 图标的**图形源文件**。
+19 个 Noto Emoji 彩色 SVG（中文文件名 / Unicode 码位命名，按用途命名），是 UI 图标的**图形源文件**。
 该目录已由 `.gitignore` 排除：运行时只用 `js/icons.js` 里的内联字符串，
 仓库里不需要这些源文件；要改图标时从 Noto Emoji 重新导出，或从本地备份取回。
 

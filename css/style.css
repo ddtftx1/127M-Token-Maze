@@ -2083,29 +2083,29 @@ body.sim-legacy-3 .icon-btn { opacity: 0.75; }
   top: calc(6px + var(--safe-t));
   left: calc(6px + var(--safe-l));
   z-index: 61;
-  width: 30px;
-  height: 30px;
+  width: 44px;                 /* 与 HUD 的 .icon-btn 同尺寸，触屏好点 */
+  height: 44px;
   padding: 0;
-  border-radius: 8px;
-  border: 1px solid var(--accent);
-  background: rgba(8, 14, 24, 0.88);
+  border-radius: 11px;
+  border: 1.5px solid var(--accent);
+  background: rgba(8, 14, 24, 0.9);
   color: var(--accent);
-  font-size: 15px;
-  line-height: 27px;
-  text-align: center;
-  opacity: 0.85;
+  font-size: 24px;             /* 内联 SVG 是 1em 见方 → 图标 24×24 */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0.9;
   cursor: pointer;
 }
 .dev-quick:active {
   opacity: 1;
   background: var(--accent);
-  color: #04121a;
 }
 .dev-quick-hud {
   top: auto;
   left: 50%;
   bottom: calc(4px + var(--safe-b));
-  margin-left: -15px;
+  margin-left: -22px;          /* 宽度的一半，保证水平居中 */
   z-index: 30;
   pointer-events: auto;   /* #hud 整体 pointer-events:none，这里单独开 */
 }

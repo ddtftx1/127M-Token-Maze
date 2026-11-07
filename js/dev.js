@@ -1294,7 +1294,11 @@
       b.type = 'button';
       b.className = 'dev-quick' + (QUICK_MOUNT_IDS[i] === 'hud' ? ' dev-quick-hud' : '');
       b.title = '开发者选项';
-      b.appendChild(document.createTextNode('◇'));
+      // 入口图标用内联 SVG（用户提供的 Noto 图标），与 icons.js 里其他图标同一套机制；
+      // 取不到时回落到一个普通字符，保证按钮不会变空。
+      var svgHtml = (MG.UI && MG.UI.iconHtml) ? MG.UI.iconHtml('dev') : '';
+      if (svgHtml) b.innerHTML = svgHtml;
+      else b.appendChild(document.createTextNode('◇'));
       b.addEventListener('click', function (e) {
         if (e) {
           if (e.stopPropagation) e.stopPropagation();

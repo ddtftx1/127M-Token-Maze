@@ -33,13 +33,16 @@
         var k = DIFF_KEYS[i];
         if (Object.prototype.toString.call(data[k]) === '[object Array]') {
           // 逐条过滤损坏记录：缺 time/steps 的条目会让 compareEntries 算出 NaN，
-          // Array.sort 的结果随之不确定（可能把坏条目排到第 1），宁可直接丢弃
+          // Array.sort 的结果随之不确定（可能把坏条目排到第 1），宁可直接丢弃；
+          // 同时丢弃"用时 <= 0 / 步数为负"的条目 —— add() 本来就拒绝非正用时（见下方守卫），
+          // 但盘上手改/导入的脏条目能永久霸占榜首（真实成绩永远挤不掉它），
+          // 这里按同一口径清掉，让 add() 的守住在读盘侧也成立。
           var arr = [];
           for (var j = 0; j < data[k].length; j++) {
             var it = data[k][j];
             if (!it || typeof it !== 'object') continue;
-            if (typeof it.time !== 'number' || !isFinite(it.time)) continue;
-            if (typeof it.steps !== 'number' || !isFinite(it.steps)) continue;
+            if (typeof it.time !== 'number' || !isFinite(it.time) || it.time <= 0) continue;
+            if (typeof it.steps !== 'number' || !isFinite(it.steps) || it.steps < 0) continue;
             // 旧数据兼容：没有 seq 的记录按现有顺序补发提交序号（先来的序号小）
             if (!(typeof it.seq === 'number' && isFinite(it.seq))) it.seq = arr.length;
             arr.push(it);

@@ -35,6 +35,13 @@
   var RARE_CHANCE = 0.08;
   /** 签到护符最多保住"漏签 5 天"；超过则视为彻底中断 */
   var SHIELD_MAX_MISSED = 5;
+  /**
+   * "时钟倒退"异常持续达到该天数即自愈（用户 2026-11-08 拍板）。
+   * 为什么是 3：1 天可能只是时区/夏令时/手动校时的抖动，2 天仍可能只是玩家忘了把时间调回来，
+   * 连续 3 天还早于上次签到日，就足以确认存档里的那个"未来日期"不可能再等到，再锁下去
+   * 只会让玩家（尤其是不常开机的）永久拿不到签到 —— 与 parseDay 注释里"不能永久锁死"的承诺一致。
+   */
+  var CLOCK_RESET_DAYS = 3;
   /** 留痕天数（异常审计用） */
   var HISTORY_MAX = 14;
   /** 跨零点轮询间隔 */
@@ -167,7 +174,10 @@
       totalDays: 0,
       maxStreak: 0,
       days: [],
-      anomaly: 0
+      anomaly: 0,
+      // 本轮"时钟倒退"异常的首次观测日（'YYYYMMDD'）。自愈判定的锚点，
+      // 领取成功后清零（见 claim()），因此它存在即代表"这轮异常还没结束"
+      anomalyFrom: ''
     };
     if (!raw || typeof raw !== 'object' || isArray(raw)) return d;
 
@@ -177,6 +187,9 @@
     d.totalDays = clampInt(raw.totalDays, 0, 1000000000);
     d.maxStreak = clampInt(raw.maxStreak, 0, 1000000);
     d.anomaly = clampInt(raw.anomaly, 0, 1000000);
+    if (isDayKey(raw.anomalyFrom)) d.anomalyFrom = raw.anomalyFrom;
+    // 一致性兜底：有锚点就至少已观测到 1 天（手改档把 anomaly 清 0 时别把天数算少了）
+    if (d.anomalyFrom && d.anomaly < 1) d.anomaly = 1;
 
     if (isArray(raw.days)) {
       for (var i = 0; i < raw.days.length; i++) {
@@ -294,6 +307,40 @@
   }
 
   /**
+   * 当前"时钟倒退"已持续到第几天（今天算第 1 天）。纯函数，不写盘。
+   * 以首次观测日 data.anomalyFrom 为锚累加：观测不到的那几天无法判定，
+   * 按"异常仍在持续"计入（宁可提前自愈，也不要让不常开机的玩家被永久锁死）。
+   * @returns {number} >= 1
+   */
+  function clockStrikes(data, today) {
+    if (!data || !isDayKey(data.anomalyFrom)) return 1;
+    var d = dayDiff(data.anomalyFrom, today);
+    if (d === null) return 1;
+    if (d < 0) d = 0;   // 观测日自身倒退（异常输入）：不重复累加，按当天算
+    return d + 1;
+  }
+
+  /**
+   * 记下"今天又一次检测到时钟倒退"。
+   * - 只维护锚点 anomalyFrom：本轮首次异常日一旦记下就不再改，直到领取成功后清零；
+   * - 同一天重复调用不写盘（计数没变），因此角标刷新 / 打开面板这类高频入口不会写盘放大。
+   * @returns {boolean} 是否真的写了盘
+   */
+  function recordClockAnomaly(data) {
+    if (!data) return false;
+    var today = dayKey();
+    if (!isDayKey(data.anomalyFrom)) {
+      data.anomalyFrom = today;
+      data.anomaly = 1;
+      return save(data);
+    }
+    var n = clockStrikes(data, today);
+    if (n === data.anomaly) return false;
+    data.anomaly = n;
+    return save(data);
+  }
+
+  /**
    * 依据当前存档判断"今天能不能签、签了连签到第几天"
    * @returns {{day:string, canClaim:boolean, reason:string, kind:string,
    *            streak:number, missed:number, useShield:boolean, shields:number, data:object}}
@@ -324,6 +371,17 @@
 
     // 时间倒流（改系统时间 / 时区回退）：只拦不罚，记一次 anomaly
     if (today < data.lastDay) {
+      var strikes = clockStrikes(data, today);
+      out.anomaly = strikes;
+      // 连续 CLOCK_RESET_DAYS 天仍早于上次签到日：认定那份"未来日期"存档已不可能等到，
+      // 按今天重置基准日恢复签到（连签清零、护符不消耗、异常计数清零）——否则玩家被永久锁死
+      if (strikes >= CLOCK_RESET_DAYS) {
+        out.canClaim = true;
+        out.kind = 'clock-reset';
+        out.reason = 'clock-reset';
+        out.streak = 1;
+        return out;
+      }
       out.reason = 'clock';
       out.streak = data.streak;
       return out;
@@ -377,6 +435,13 @@
   function syncView() {
     var data = load();
     var plan = evaluate(data);
+    // 面板一打开 / 跨天重绘就把"今天检测到时钟倒退"记下来（同一天只写一次盘）。
+    // 放在 evaluate 之后、缓存 view 之前：view.data 直接带上最新锚点，
+    // claim() 落签时不会把刚记的锚点又写回旧值。
+    if (plan.reason === 'clock' && !plan.canClaim) {
+      recordClockAnomaly(data);
+      plan.anomaly = data.anomaly;
+    }
     var reward = plan.canClaim ? rollReward(plan.streak, plan.kind === 'first') : null;
     view = { day: plan.day, plan: plan, reward: reward, data: data };
     return view;
@@ -389,11 +454,12 @@
 
     if (!plan.canClaim) {
       if (plan.reason === 'clock') {
-        data.anomaly = (data.anomaly || 0) + 1;
-        save(data);
+        // 与角标 / 面板共用同一条计数路径：以"首次异常日"为锚按天累加，
+        // 同一天重复调用不会把天数刷多（避免连点几下就被当成"连续 3 天"而提前自愈）
+        recordClockAnomaly(data);
         play('error');
         uiToast('检测到系统时间异常，本次签到未发放');
-        return { ok: false, reason: 'clock' };
+        return { ok: false, reason: 'clock', anomaly: data.anomaly, anomalyFrom: data.anomalyFrom };
       }
       uiToast('今天已经签到过了，明天再来');
       return { ok: false, reason: plan.reason };
@@ -420,6 +486,9 @@
     data.totalDays = (data.totalDays || 0) + 1;
     data.maxStreak = Math.max(data.maxStreak || 0, data.streak);
     if (isFirst) data.firstDone = true;
+    // 成功领取（含时钟自愈）即视为"连续异常"结束：锚点与计数一起清零
+    data.anomaly = 0;
+    data.anomalyFrom = '';
     data.days = (data.days || []).concat([plan.day]);
     if (data.days.length > HISTORY_MAX) data.days = data.days.slice(data.days.length - HISTORY_MAX);
     var saved = save(data);
@@ -501,6 +570,9 @@
     var tail = '';
     if (plan.useShield && shieldLeft >= 0) {
       tail += '（' + icon('shield') + ' 护符生效，连签保住，剩 ×' + shieldLeft + '）';
+    } else if (plan.kind === 'clock-reset') {
+      // 自愈要如实告诉玩家：连签为什么回到第 1 天（数字走常量，避免与阈值漂移）
+      tail += '（连续 ' + CLOCK_RESET_DAYS + ' 天检测到系统时间早于上次签到日期，已按今天重新开始累计连签）';
     } else if (plan.kind === 'reset' && plan.missed > 0) {
       tail += '（漏签 ' + plan.missed + ' 天，连签已从第 1 天重算）';
     }
@@ -618,10 +690,15 @@
       if (plan.canClaim) {
         if (plan.kind === 'first') hint = '首次签到，明天再来可以开始累计连签';
         else if (plan.kind === 'shielded') hint = '你漏签了 ' + plan.missed + ' 天，签到护符将自动生效并保住连签';
+        // 时钟自愈：提前说清"为什么连签从第 1 天开始"，否则和兜底那句对不上
+        else if (plan.kind === 'clock-reset') hint = '检测到系统时间已连续 ' + CLOCK_RESET_DAYS +
+          ' 天早于上次签到日期，本次签到将按今天重新开始累计连签';
         else if (plan.kind === 'reset' && plan.missed > 0) hint = '你漏签了 ' + plan.missed + ' 天，连签将从第 1 天重新开始';
         else hint = '连签到第 ' + plan.streak + ' 天，明天再来可继续累计';
       } else if (plan.reason === 'clock') {
-        hint = '检测到系统时间早于上次签到日期，请校准时区或时间后再试';
+        // 第 1~2 天被拦时也告诉玩家出口：连续 N 天仍未恢复会自动重置基准日
+        hint = '检测到系统时间早于上次签到日期，请校准时区或时间后再试；连续 ' + CLOCK_RESET_DAYS +
+          ' 天仍未恢复将自动重置签到基准日';
       } else {
         hint = '明天 00:00 之后可以再次签到';
       }
@@ -644,7 +721,15 @@
   function refreshBadge() {
     var btn = els['btn-checkin'];
     if (!btn) return;
-    var plan = evaluate(load());
+    var data = load();
+    var plan = evaluate(data);
+    // 角标是"每天一定会走到"的入口（boot / 回主菜单 / 跨天轮询），
+    // 时钟倒退的连续天数在这里累计；同一天只写一次盘，高频调用无写放大。
+    // 第 3 天 plan.canClaim 已为 true，下面的判定自然跳过（自愈当天不再记异常）。
+    if (plan.reason === 'clock' && !plan.canClaim) {
+      recordClockAnomaly(data);
+      plan.anomaly = data.anomaly;
+    }
     var dot = els['checkin-dot'];
     var label = els['checkin-entry-label'];
     var iconBox = els['checkin-entry-icon'];
@@ -852,10 +937,14 @@
     dayKey: dayKey,
     /** 只读查询：{ canClaim, reason, kind, streak, shields }，用于角标等轻量场景 */
     peek: function () {
-      var plan = evaluate(load());
+      var data = load();
+      var plan = evaluate(data);
       return {
         canClaim: plan.canClaim, reason: plan.reason, kind: plan.kind,
-        streak: plan.streak, shields: plan.shields, day: plan.day
+        streak: plan.streak, shields: plan.shields, day: plan.day,
+        // 时钟异常观测：anomaly = 已持续到第几天（含今天），anomalyFrom = 本轮首次异常日
+        anomaly: (plan.anomaly != null ? plan.anomaly : data.anomaly),
+        anomalyFrom: data.anomalyFrom
       };
     },
     /** 完整状态（面板 / 调试用） */

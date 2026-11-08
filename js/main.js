@@ -205,7 +205,14 @@
 
     try { parent.replaceChild(newCanvas, oldCanvas); } catch (e) { parent.appendChild(newCanvas); }
     MG.UI.el['game-canvas'] = newCanvas;
-    if (Game.input) Game.input.canvas = newCanvas;
+    /* 新画布要交给输入层换绑：Input._bind() 把 mousedown / click / dblclick 与指针锁定
+       直接挂在构造时那张 canvas 上（js/input.js），只改 .canvas 引用不会把监听迁过去。
+       有 setCanvas 就交给它（解绑旧节点 + 绑新节点）；没有（跨版本漂移）时退回原写法，
+       此时 #look-layer 覆盖在画布之上，点击仍能到达输入层，行为与改动前一致。 */
+    if (Game.input) {
+      if (typeof Game.input.setCanvas === 'function') Game.input.setCanvas(newCanvas);
+      else Game.input.canvas = newCanvas;
+    }
     if (Game.player) Game.player.canvas = newCanvas;
 
     var oldRenderer = Game.renderer;
@@ -392,7 +399,11 @@
     // 先让新画布就位再移除旧画布，避免中间出现空档
     try { parent.replaceChild(newCanvas, oldCanvas); } catch (e) { parent.appendChild(newCanvas); }
     MG.UI.el['game-canvas'] = newCanvas;
-    if (Game.input) Game.input.canvas = newCanvas;   // Pointer Lock 要打到新画布上
+    // 与 rebuildRenderer() 同一处理：Pointer Lock 要打到新画布上，输入层的画布监听也要换绑
+    if (Game.input) {
+      if (typeof Game.input.setCanvas === 'function') Game.input.setCanvas(newCanvas);
+      else Game.input.canvas = newCanvas;
+    }
     if (Game.player) Game.player.canvas = newCanvas;
 
     var oldRenderer = Game.renderer;
@@ -1073,6 +1084,9 @@
    * 道具面板（打开时暂停游戏，关闭后恢复）
    * ---------------------------------------------------------- */
   function openItemPanel() {
+    // 画面恢复期间不接受开面板：上下文提示层（#ctx-overlay，z-index 98）只挡指针、挡不住键盘，
+    // 而 loopBody 已挂起，按 F 会在恢复后留下一个"凭空打开"的道具面板（state 也被改成 paused）
+    if (Game._ctxRecovering) return;
     if (Game.state !== 'playing' || !Game.player) return;
     Game.itemPanelOpen = true;
     Game.state = 'paused'; // 暂停游戏逻辑（计时停止）
@@ -1092,6 +1106,16 @@
       MG.UI.show('hud'); // 与 openItemPanel 的隐藏成对，恢复 HUD
       Game.clock.getDelta(); // 丢弃暂停期间累积时间
     }
+  }
+
+  /**
+   * 扣道具失败时的提示文案。
+   * consumeItem() 返回 false 有两种原因：数量不足，或钱包写盘失败（shop 会把次数回滚）。
+   * 后者若还提示"道具不足"，玩家会以为是自己没道具 —— 这里按 shop 记录的失败原因区分。
+   */
+  function consumeFailMsg() {
+    var err = (MG.Shop && MG.Shop.takeSaveError) ? MG.Shop.takeSaveError() : null;
+    return err === 'consume' ? '本地存档无法写入，道具未使用' : '道具不足';
   }
 
   /**
@@ -1116,7 +1140,7 @@
         return;
       }
       if (!MG.Shop.consumeItem('mapUnlock')) {
-        MG.UI.toast('道具不足');
+        MG.UI.toast(consumeFailMsg());
         if (MG.Audio) MG.Audio.error();
         return;
       }
@@ -1147,7 +1171,7 @@
         // 关键：triggerAutoPath 内部会置 usedAutoPath=true，扣费失败必须回滚，
         // 否则玩家没用掉道具却被记成"用过自动寻路"，「自力更生」成就从此拿不到
         Game.usedAutoPath = wasAuto;
-        MG.UI.toast('道具不足');
+        MG.UI.toast(consumeFailMsg());
         if (MG.Audio) MG.Audio.error();
         return;
       }
@@ -1195,6 +1219,9 @@
   }
 
   function restartGame() {
+    // 画面恢复期间不接受重开：会在一个救不回来的渲染器上再建整关，
+    // 且幽灵询问弹窗被提示层盖住点不到，只能等 15 秒超时（与 openItemPanel 同一处理）
+    if (Game._ctxRecovering) return;
     clearAchieveToastTimer();
     MG.UI.hidePause();
     // 退出指针锁定：否则光标隐藏，若本局存在回放会弹幽灵询问框，玩家点不到按钮（只能 ESC / 等 15s）
@@ -1791,22 +1818,27 @@
         var rebuilt = rebuildRenderer();
         // 重建成功才记账：失败时保持旧值，等玩家下次再切档（或内存腾出来）时有重试机会
         if (rebuilt) Game._appliedQuality = settings.quality;
-        applyQualityToSun(settings);
-        if (Game.mazeView && typeof Game.mazeView.applyQuality === 'function') {
-          Game.mazeView.applyQuality(settings.quality);
-        }
-        // 阴影与画质同口径：低画质既不接收也不投射；切回中/高档时恢复
-        if (Game.mazeView && Game.mazeView.walls) {
-          var wallsShadow = !!settings.shadows && settings.quality !== 'low';
-          Game.mazeView.walls.castShadow = wallsShadow;
-          Game.mazeView.walls.receiveShadow = wallsShadow;
-        }
         if (evt.key === 'quality') {
           var qname = qualityLabel(settings.quality);
           MG.UI.toast(rebuilt
             ? ('画质已切换为「' + qname + '」，立即生效')
             : ('画质已切换为「' + qname + '」，但渲染器重建失败，请刷新页面'), 2400);
         }
+      }
+      /* 下面三项与"渲染器要不要重建"是两件事，必须每次都按 MazeView 自己的档位比对：
+         重建失败时 _appliedQuality 保持旧值，而 MazeView 已经在上一轮换到了新档位；
+         玩家再切回旧档时会走进上面"档位没变"的跳过分支，MazeView 就永久停在新档位
+         （墙檐 / 粒子 / 阴影接收与设置、渲染器不一致）。
+         applyQualityToSun 与 applyQuality 都是幂等的（同档直接早退），重复调用无副作用。 */
+      applyQualityToSun(settings);
+      if (Game.mazeView && typeof Game.mazeView.applyQuality === 'function') {
+        Game.mazeView.applyQuality(settings.quality);
+      }
+      // 阴影与画质同口径：低画质既不接收也不投射；切回中/高档时恢复
+      if (Game.mazeView && Game.mazeView.walls) {
+        var wallsShadow = !!settings.shadows && settings.quality !== 'low';
+        Game.mazeView.walls.castShadow = wallsShadow;
+        Game.mazeView.walls.receiveShadow = wallsShadow;
       }
       applyPixelRatio();
       onResize();
@@ -1871,7 +1903,8 @@
    * 启动
    * ---------------------------------------------------------- */
   /* ------------------------------------------------------------
-   * 老内核降级（Chrome 49 / Win7）
+   * 老内核降级（Win7 上最后能装的 Chrome 是 109；109 已原生支持下列全部特性，
+   * 故这 4 个能力补偿类在 109 上一个都不会触发 —— 口径见 BUG/BUG.md 的「兼容口径订正」）
    * ---------------------------------------------------------- */
   /**
    * 特性检测 → 给 body 挂 legacy-* class，配合 css/style.css 末尾的降级规则。

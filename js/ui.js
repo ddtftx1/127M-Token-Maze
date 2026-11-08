@@ -854,6 +854,8 @@
       if (MG.Audio && S.get().sfx) MG.Audio.error();
       if (res.reason === 'poor') toast('金币不足，去多跑几局吧');
       else if (res.reason === 'max') toast('已达购买上限');
+      // 写盘失败：金币与数量都已由 shop 回滚，这里必须说清"没买成"，不能报成功
+      else if (res.reason === 'save') toast('购买失败：本地存档无法写入（隐私模式或空间已满）', 3200);
     }
     refreshShop();
   }
@@ -1785,6 +1787,19 @@
           也可能不派发事件）。 */
   var fsStateKnown = null;   // 上一次已知的全屏状态，用于给重复事件去重
   var fsToggleSeq = 0;       // 每次请求全屏/退出全屏自增，用来作废过期的兜底定时器
+  /* 最近一次请求的目标状态，以及它是否已被 fullscreenchange 确认达成。
+     用途：900ms 兜底不能用"此刻状态 == 请求前状态"判定（BUG-042②），但只按"目标状态
+     是否达成"判定也不够 —— 进全屏成功后 900ms 内按 ESC / F11 / 系统手势退出，此刻状态
+     恰好不等于目标，仍会被判成"进入全屏失败"。这里把"事件确认过目标状态"记下来，
+     只要达成过就算本次请求成功，之后再退出全屏也不误报。 */
+  var fsPendingWant = null;
+  var fsPendingReached = false;
+
+  /** 记录本次请求的目标状态（在真正发起请求前置位） */
+  function markFullscreenPending(want) {
+    fsPendingWant = want;
+    fsPendingReached = false;
+  }
 
   function fullscreenElement() {
     var doc = document;
@@ -1793,6 +1808,8 @@
 
   function onFullscreenChange() {
     var on = !!fullscreenElement();
+    // 目标状态一旦被事件确认，本次请求即算成功（之后退出全屏不再算"请求失败"）
+    if (fsPendingWant !== null && on === fsPendingWant) fsPendingReached = true;
     if (on === fsStateKnown) return;   // 两种事件可能都派发，同一状态只提示一次
     fsStateKnown = on;
     toast(on ? '已进入全屏' : '已退出全屏');
@@ -1831,10 +1848,12 @@
       if (wantFull) {
         var reqFn = elem.requestFullscreen || elem.webkitRequestFullscreen;
         if (!reqFn) { toast('当前浏览器不支持全屏', 2600); return; }
+        markFullscreenPending(wantFull);
         ret = reqFn.call(elem);
       } else {
         var exitFn = doc.exitFullscreen || doc.webkitExitFullscreen;
         if (!exitFn) { toast('当前浏览器不支持退出全屏', 2600); return; }
+        markFullscreenPending(wantFull);
         ret = exitFn.call(doc);
       }
       if (ret && typeof ret['catch'] === 'function') ret['catch'](fail);
@@ -1845,11 +1864,11 @@
 
     setTimeout(function () {
       if (settled) return;
-      /* 过期作废：900ms 内又点了一次（或按 ESC 退出了），判定依据已经不成立。
-         原实现看的是"当前状态 == 请求前状态"，双击时先进后出正好回到原状态，
-         于是**在两次都成功之后**弹一句"进入全屏失败"。 */
+      /* 过期作废：900ms 内又点了一次按钮，判定依据已经不成立（fsToggleSeq 已自增）。
+         再按「目标状态是否达成」判定：达成过（fsPendingReached，由 fullscreenchange 确认）
+         或此刻仍是目标状态都算成功；只有从未达成才报失败。 */
       if (seq !== fsToggleSeq) return;
-      if (!!fullscreenElement() === wantFull) settled = true;
+      if (fsPendingReached || !!fullscreenElement() === wantFull) settled = true;
       else fail(null);
     }, 900);
   }

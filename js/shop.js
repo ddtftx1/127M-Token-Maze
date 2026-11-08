@@ -149,24 +149,65 @@
     return safeSet(STORAGE_KEY, JSON.stringify(wallet));
   }
 
+  /**
+   * 作废内存缓存（下次 getWallet() 重新读盘）。
+   *
+   * 外部绕过 shop 直接改写 localStorage（开发者面板的删除 / 清空 / 导入存档）后必须调用：
+   * 否则模块级缓存里的旧钱包会在下一次加币 / 购买时被整份回写，刚删除或刚导入的钱包静默失效。
+   * 跨标签页场景由 bindStorageSync 的 storage 事件覆盖，与这里互补。
+   */
+  function invalidateCache() { wallet = null; }
+
+  /* ------------------------------------------------------------
+   * 写盘失败的如实反馈（2026-11-08 复查批次）
+   * ------------------------------------------------------------
+   * safeSet() 在隐私模式 / 配额已满 / 存储被禁用时会返回 false，原实现把它整个吞掉：
+   * 玩家买了道具、扣了金币、界面弹「购买成功」，但磁盘上什么都没变 —— 下次启动道具与
+   * 余额一起回退，像是"凭空消失"。
+   *
+   * 现在的口径：
+   *   - buy / spendCoins / consumeItem 写盘失败时**回滚内存改动**再返回失败，
+   *     不让"扣了钱没落盘"或"道具用了还能用"这种中间态留在内存里；
+   *   - 失败原因记在 lastSaveError，调用方用 takeSaveError() 取（读取即清空），
+   *     以便把"余额不足"和"存档不可写"两种失败区分开，给出不一样的提示；
+   *   - addCoins 是唯一例外：通关奖励已经算给玩家了，回滚反而会吞掉奖励，
+   *     故保持尽力而为（写盘失败时只是本局收益不落盘，不改内存与界面数字）。
+   * ---------------------------------------------------------- */
+  var lastSaveError = null;
+
+  /** 取走最近一次写盘失败的操作名（'buy'/'spend'/'consume'/'addItem'），读取即清空 */
+  function takeSaveError() {
+    var e = lastSaveError;
+    lastSaveError = null;
+    return e;
+  }
+
   /** 增加金币（返回最新余额） */
   function addCoins(n) {
+    lastSaveError = null;            // 每次动作先清旧值：调用方读到的必须是本次的结果
     var w = getWallet();
     var add = Math.floor(Number(n) || 0);
     if (add <= 0) return w.coins;
     w.coins += add;
-    saveWallet();
+    // 通关奖励不回滚：见上方口径说明
+    if (!saveWallet()) lastSaveError = 'addCoins';
     return w.coins;
   }
 
   /** 尝试扣除金币（余额不足返回 false） */
   function spendCoins(n) {
+    lastSaveError = null;
     var w = getWallet();
     var cost = Math.floor(Number(n) || 0);
     if (cost <= 0) return true;
     if (w.coins < cost) return false;
+    var prev = w.coins;
     w.coins -= cost;
-    saveWallet();
+    if (!saveWallet()) {
+      w.coins = prev;                 // 写盘失败：回滚，不能让内存与磁盘分叉
+      lastSaveError = 'spend';
+      return false;
+    }
     return true;
   }
 
@@ -198,31 +239,47 @@
   /**
    * 购买商品（直购）
    * @returns {{ok:boolean, reason?:string, item?:object}}
-   *   reason: 'invalid' | 'max' | 'poor'
+   *   reason: 'invalid' | 'max' | 'poor' | 'save'
    */
   function buy(id) {
+    lastSaveError = null;
     var item = getItem(id);
     if (!item) return { ok: false, reason: 'invalid' };
     var w = getWallet();
     if (isMaxed(id)) return { ok: false, reason: 'max', item: item };
     if (w.coins < item.price) return { ok: false, reason: 'poor', item: item };
 
+    var prevCoins = w.coins;
+    var prevOwned = w[id];
     w.coins -= item.price;
     if (item.type === 'buyout') w[id] = true;
     else w[id] = countOf(id) + 1;
-    saveWallet();
+    if (!saveWallet()) {
+      // 写盘失败：把内存里的金币与数量一起还原，并如实告诉调用方（不是"金币不足"）
+      w.coins = prevCoins;
+      if (prevOwned === undefined) delete w[id]; else w[id] = prevOwned;
+      lastSaveError = 'buy';
+      return { ok: false, reason: 'save', item: item };
+    }
     return { ok: true, item: item };
   }
 
   /** 消耗一次道具（数量不足返回 false；买断类不可消耗） */
   function consumeItem(id) {
+    lastSaveError = null;
     var item = getItem(id);
     if (!item || item.type === 'buyout') return false;
     var w = getWallet();
     var cur = countOf(id);
     if (cur <= 0) return false;
+    var prevOwned = w[id];
     w[id] = cur - 1;
-    saveWallet();
+    if (!saveWallet()) {
+      // 写盘失败：把次数还原，避免"用了但下次启动又回来"的假消耗
+      if (prevOwned === undefined) delete w[id]; else w[id] = prevOwned;
+      lastSaveError = 'consume';
+      return false;
+    }
     return true;
   }
 
@@ -241,6 +298,7 @@
    * @returns {boolean} 是否成功写入
    */
   function addItem(id, n) {
+    lastSaveError = null;
     var item = getItem(id);
     // 只允许可计数的道具；买断类与未知 id 一律拒绝，且不触碰钱包
     if (!item || item.type !== 'count') return false;
@@ -251,7 +309,9 @@
     var w = getWallet();
     // 用 countOf() 读取再写回：与 buy / consumeItem 保持同一口径（兼容旧数据与损坏修复后的值）
     w[id] = countOf(id) + add;
-    return saveWallet();
+    var ok = saveWallet();
+    if (!ok) lastSaveError = 'addItem';
+    return ok;
   }
 
   /** 金币收益倍率（默认 1.0，买断后 1.25） */
@@ -269,6 +329,8 @@
     ITEMS: ITEMS,
     getWallet: getWallet,
     saveWallet: saveWallet,
+    invalidateCache: invalidateCache,
+    takeSaveError: takeSaveError,
     addCoins: addCoins,
     spendCoins: spendCoins,
     getItem: getItem,

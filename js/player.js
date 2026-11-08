@@ -384,6 +384,11 @@
 
     if (moved) {
       this._stuckCount = 0;
+      /* 晃动幅度按与手动移动（updateManual 的移动分支）同一口径恢复：
+         幅度在 syncCamera 里要乘 _bobDamping 才可见，而站定约 0.17 秒就把它衰减到 0。
+         不在这里恢复的话，"站定 → 开道具面板 → 点寻路"这条常态路径全程看不到晃动，
+         与下面推进 bobPhase 的意图不符（自动寻路也是"在走路"）。 */
+      this._bobDamping = Math.min(1, this._bobDamping + dt * 4);
       this.bobPhase += dt * 10.5;
       this.accumulateSteps(step, settings);
       // 距离限制：按网格步数计量（相邻两格 = 1 步），到点即停

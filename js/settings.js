@@ -197,10 +197,18 @@
    */
   function submitRecord(diff, time, steps) {
     var rec = loadRecords();
-    if (!isFinite(Number(time))) time = 0;
-    if (!isFinite(Number(steps))) steps = 0;
     var cur = rec[diff];
-    if (cur && (typeof cur !== 'object' || !isFinite(cur.time) || !isFinite(cur.steps))) cur = null;
+    // 存档里 time <= 0 / 步数非法的旧条目按无效处理：0 秒记录会让"更优"判定恒为 false
+    // （0 < 任何正数），成绩从此刻起永不更新 —— 与 loadRecords 注释承诺的自愈一致
+    if (cur && (typeof cur !== 'object' || !isFinite(cur.time) || cur.time <= 0 || !isFinite(cur.steps))) cur = null;
+    // 入参必须是有限正用时：原实现把非法值兜底成 0，等于把"坏输入"写成了"理论最佳"，
+    // 而 MG.Ranking.add 的守卫是明确拒绝 0 秒直占榜首的，这里按同一口径拒绝而不是兜底。
+    if (!isFinite(Number(time)) || Number(time) <= 0) {
+      return { isBest: false, best: cur || null, all: rec };
+    }
+    var s = Number(steps);
+    if (!isFinite(s) || s < 0) s = 0;
+    steps = s;
     var isBest = false;
     // 时间按 1ms 容差比较：存储的是未舍入的 elapsed，浮点严格相等几乎不可能命中，
     // 会导致"同样快但步数更少"无法更新记录
@@ -255,13 +263,19 @@
   /** 增加计数器类成就数据（如通关次数） */
   function bumpCounter(id) {
     var a = loadAchievements();
-    a['counter_' + id] = (a['counter_' + id] || 0) + 1;
+    var key = 'counter_' + id;
+    // 旧档 / 手改档里可能是字符串（"5"），直接 +1 会变成字符串拼接（"51"、"511"…）；
+    // 这里数值化后再累加：既修掉拼接，又保留玩家已有的通关计数（不静默清零）
+    var prev = Number(a[key]);
+    if (!isFinite(prev) || prev < 0) prev = 0;
+    a[key] = prev + 1;
     saveAchievements(a);
-    return a['counter_' + id];
+    return a[key];
   }
   function getCounter(id) {
     var a = loadAchievements();
-    return a['counter_' + id] || 0;
+    var v = Number(a['counter_' + id]);
+    return (isFinite(v) && v >= 0) ? v : 0;
   }
 
   /* ------------------------------------------------------------

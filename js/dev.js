@@ -123,6 +123,11 @@
     if (MG.Checkin && MG.Checkin.refreshBadge) MG.Checkin.refreshBadge();
   }
 
+  /** 让钱包模块丢掉内存缓存（同上：shop 缓存着整份钱包，不回读就会把刚删/刚导入的档整份写回） */
+  function resetShopCache() {
+    if (MG.Shop && MG.Shop.invalidateCache) MG.Shop.invalidateCache();
+  }
+
   function safeGet(key) {
     try { return global.localStorage.getItem(key); } catch (e) { return null; }
   }
@@ -1215,6 +1220,8 @@
         // 签到模块会缓存内存副本：key 删掉后它的 load() 会走"存储不可用"分支拿旧档，
         // 表现为"已删除但角标还是今日已签到"。删到签到 key 就同步清缓存。
         if (arg === CHECKIN_KEY) resetCheckinCache();
+        // 钱包同理：shop 缓存着整份钱包，不清缓存的话下一次加币 / 购买会把刚删除的 key 写回来
+        if (MG.Shop && arg === MG.Shop.STORAGE_KEY) resetShopCache();
         setStatus('ok', '已删除 ' + arg);
         renderBody();
       } else setStatus('err', '删除失败');
@@ -1226,6 +1233,7 @@
         if (keys[m].indexOf('maze3d.') === 0 && safeDel(keys[m])) n++;
       }
       resetCheckinCache();   // 全清了，签到内存副本同样要作废
+      resetShopCache();      // 钱包缓存同样要作废，否则旧钱包会被后续操作整份写回
       setStatus('ok', '已清空 ' + n + ' 个存档 key（刷新页面后完全生效）');
       renderBody();
       return;
@@ -1257,6 +1265,7 @@
         if (safeSet(kk, parsed[kk])) count++;
       }
       resetCheckinCache();
+      resetShopCache();   // 导入同样可能覆盖钱包 key，缓存要一起作废才真正生效
       setStatus('ok', '已导入 ' + count + ' 个 key' +
         (skipped ? '（跳过 ' + skipped + ' 个非 maze3d.* 或非字符串项）' : '') +
         '（刷新页面后完全生效）');
@@ -1282,12 +1291,16 @@
   }
 
   function doGoto(target) {
+    // close(true) 是静默关闭：它会把 pauseResume 清零（:409），而"设置"页的返回目标要靠
+    // settingsFrom 记住来源。不先把暂停态记下来，从暂停局跳到设置后点「返回」会落到主菜单，
+    // 把一局 state==='paused' 的对局盖在下面（导航不一致，见 BUG(2026.11.08) 的 BUG-052）。
+    var wasPaused = pauseResume;
     close(true);
     if (target === 'menu' && MG.UI) MG.UI.showMainMenu();
     else if (target === 'shop' && MG.UI) MG.UI.openShop();
     else if (target === 'ach' && MG.UI) MG.UI.openAchievements();
     else if (target === 'rank' && MG.UI) MG.UI.openRanking();
-    else if (target === 'settings' && MG.UI) MG.UI.showSettings();
+    else if (target === 'settings' && MG.UI) MG.UI.showSettings(wasPaused ? 'pause-menu' : 'main-menu');
     else if (target === 'checkin' && MG.Checkin) MG.Checkin.openPanel();
   }
 

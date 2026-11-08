@@ -15,7 +15,8 @@
    * @param {HTMLElement} joystickEl 摇杆容器
    * @param {HTMLElement} knobEl 摇杆手柄
    * @param {HTMLElement} lookLayer 视角触控层（全屏）
-   * @param {HTMLElement} hud HUD 容器（用于判断是否点到了按钮）
+   * @param {HTMLElement} hud HUD 容器（保留参数与字段：点击语义自 BUG-019 起改由
+   *   getState() 判定"现在该不该锁指针"，本类已不再直接读取 HUD，见 _bindMouseOn）
    * @param {HTMLCanvasElement} canvas
    */
   function Input(joystickEl, knobEl, lookLayer, hud, canvas) {
@@ -275,40 +276,12 @@
        注意：#look-layer 覆盖在 canvas 之上，因此鼠标事件必须绑定在它上面，
        否则"点击锁定指针"不会触发。
        锁定后光标隐藏，移动鼠标即转视角；按 ESC 或窗口失焦时由浏览器自动退出并恢复光标。
-       不再保留"按住左键拖动转视角"：那种写法在鼠标拖出窗口后松开时会卡住视角自转。 */
-    var mouseTargets = [this.lookLayer, this.canvas];
-    for (var mi = 0; mi < mouseTargets.length; mi++) {
-      (function (node) {
-        if (!node) return;
-        node.addEventListener('mousedown', function (e) {
-          if (e.button !== 0) return;
-          self._notifyFirstInput();
-        });
-        /**
-         * 点击画面的语义（BUG-019）：
-         * - 触摸产生的合成 click 一律忽略（见 _lastTouchTime）
-         * - 只认"悬停 + 精细指针"设备（鼠标 / 触控板），触屏走 touch 事件
-         * - 回放态：点击 = 暂停 / 继续，绝不请求 Pointer Lock
-         * - 非 playing 态（菜单 / 暂停 / 胜利 / 加载）：不请求 Pointer Lock
-         * - playing 态：保持原行为，点击锁定指针
-         */
-        node.addEventListener('click', function () {
-          if (Date.now() - self._lastTouchTime < 500) return;
-          if (!hasHoverPointer()) return;
-          var state = self.getState ? self.getState() : 'playing';
-          if (state === 'replay') {
-            if (self.onToggleReplayPause) self.onToggleReplayPause();
-            return;
-          }
-          if (state !== 'playing') return;
-          if (!self.pointerLocked && !document.hidden) {
-            self.requestPointerLock();
-          }
-        });
-        // 双击只在游戏画面区域阻止默认行为；输入框 / 面板等保留浏览器默认（可正常双击选词）
-        node.addEventListener('dblclick', function (e) { e.preventDefault(); }, { passive: false });
-      })(mouseTargets[mi]);
-    }
+       不再保留"按住左键拖动转视角"：那种写法在鼠标拖出窗口后松开时会卡住视角自转。
+       #game-canvas 会被整张替换（main.js 的画质切换 rebuildRenderer / 上下文丢失救援
+       recreateRenderer 都新建 canvas 再 replaceChild），所以画布上的监听必须能被
+       setCanvas() 解绑重绑；look-layer 常驻，绑一次就够。 */
+    this._bindMouseOn(this.lookLayer);
+    this._bindMouseOn(this.canvas, true);
 
     window.addEventListener('mousemove', function (e) {
       // 只有锁定状态才转视角：movementX/Y 是原始位移，鼠标可无限移动，不会撞到窗口边缘
@@ -351,6 +324,80 @@
     for (var i = 0; i < scrollables.length; i++) {
       scrollables[i].dataset.scrollable = '1';
     }
+  };
+
+  /**
+   * 给一个节点挂"指针锁定"相关的鼠标监听（mousedown / click / dblclick）
+   * @param {HTMLElement} node 目标节点
+   * @param {boolean} [track] 是否记录句柄（只有会被整张替换的 canvas 需要，
+   *   其它常驻节点不需要记录，避免无意义的状态）
+   */
+  Input.prototype._bindMouseOn = function (node, track) {
+    if (!node) return;
+    var self = this;
+
+    function onMouseDown(e) {
+      if (e.button !== 0) return;
+      self._notifyFirstInput();
+    }
+    /**
+     * 点击画面的语义（BUG-019）：
+     * - 触摸产生的合成 click 一律忽略（见 _lastTouchTime）
+     * - 只认"悬停 + 精细指针"设备（鼠标 / 触控板），触屏走 touch 事件
+     * - 回放态：点击 = 暂停 / 继续，绝不请求 Pointer Lock
+     * - 非 playing 态（菜单 / 暂停 / 胜利 / 加载）：不请求 Pointer Lock
+     * - playing 态：保持原行为，点击锁定指针
+     */
+    function onClick() {
+      if (Date.now() - self._lastTouchTime < 500) return;
+      if (!hasHoverPointer()) return;
+      var state = self.getState ? self.getState() : 'playing';
+      if (state === 'replay') {
+        if (self.onToggleReplayPause) self.onToggleReplayPause();
+        return;
+      }
+      if (state !== 'playing') return;
+      if (!self.pointerLocked && !document.hidden) {
+        self.requestPointerLock();
+      }
+    }
+    // 双击只在游戏画面区域阻止默认行为；输入框 / 面板等保留浏览器默认（可正常双击选词）
+    function onDblClick(e) { e.preventDefault(); }
+
+    node.addEventListener('mousedown', onMouseDown);
+    node.addEventListener('click', onClick);
+    node.addEventListener('dblclick', onDblClick, { passive: false });
+
+    if (track) {
+      this._canvasMouseNode = node;
+      this._canvasMouseHandlers = [
+        { type: 'mousedown', fn: onMouseDown },
+        { type: 'click', fn: onClick },
+        { type: 'dblclick', fn: onDblClick }
+      ];
+    }
+  };
+
+  /**
+   * 换绑游戏画布（main.js 的 rebuildRenderer / recreateRenderer 会整张替换 #game-canvas）
+   * 只把 this.canvas 指过去是不够的：旧节点上那三个鼠标监听会一直挂在已脱离文档的节点上，
+   * 新画布上则一个都没有（与 main.js 那句"Pointer Lock 要打到新画布上"的意图不符）。
+   * 这里解绑旧画布、绑到新画布，其它输入状态一律不动。
+   * @param {HTMLCanvasElement} newCanvas
+   */
+  Input.prototype.setCanvas = function (newCanvas) {
+    if (!newCanvas || newCanvas === this.canvas) return;
+    var old = this._canvasMouseNode;
+    var hs = this._canvasMouseHandlers || [];
+    if (old) {
+      for (var i = 0; i < hs.length; i++) {
+        try { old.removeEventListener(hs[i].type, hs[i].fn); } catch (e) { /* 忽略 */ }
+      }
+    }
+    this.canvas = newCanvas;
+    this._canvasMouseNode = null;
+    this._canvasMouseHandlers = null;
+    this._bindMouseOn(newCanvas, true);
   };
 
   /**

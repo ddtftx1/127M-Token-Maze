@@ -17,6 +17,26 @@
   /** 金币收益买断后的倍率 */
   var BOOST_MULTIPLIER = 1.25;
 
+  /**
+   * 钱包数值上限（BUG-058，2026-11-09）。
+   *
+   * 为什么必须有：`JSON.stringify(Infinity)` 得到的是 `null`，而 `normalizeWallet()` 会把
+   * 非有限数当损坏数据丢弃 → 下次启动整个余额静默清零。原先只钳下界（不小于 0），
+   * 于是"余额 1e308 + 奖励 1e308 = Infinity"会落盘成 `{"coins":null}`，一局白玩。
+   *
+   * 取 `Number.MAX_SAFE_INTEGER`（2^53-1 = 9007199254740991）而不是自造的数字：
+   * 它是 JS 能精确表示的最大整数，超过它连 `+1` 都不再可靠；对一款迷宫游戏来说
+   * 这个量级（约 900 万亿金币）已经远超任何正常玩法与彩蛋奖励，不会影响真实体验。
+   */
+  var MAX_WALLET_VALUE = Number.MAX_SAFE_INTEGER;
+
+  /** 把任意数值钳到 [0, MAX_WALLET_VALUE]（先处理 Infinity / NaN，再取整） */
+  function clampValue(v) {
+    var n = Math.floor(Number(v));
+    if (!isFinite(n) || n <= 0) return 0;          // NaN / ±Infinity / 负数一律回落 0
+    return n > MAX_WALLET_VALUE ? MAX_WALLET_VALUE : n;
+  }
+
   /** 默认钱包结构 */
   var DEFAULT_WALLET = {
     coins: 0,            // 金币余额
@@ -90,7 +110,8 @@
     if (!data || typeof data !== 'object') return w;
 
     if (typeof data.coins === 'number' && isFinite(data.coins)) {
-      w.coins = Math.max(0, Math.floor(data.coins));
+      // 上界钳制：手改 / 导入的 1e308 级余额也要收敛到安全整数，避免溢出成 Infinity（BUG-058）
+      w.coins = clampValue(data.coins);
     }
     if (typeof data.boostEarn === 'boolean') w.boostEarn = data.boostEarn;
 
@@ -98,8 +119,8 @@
     for (var i = 0; i < countKeys.length; i++) {
       var k = countKeys[i];
       if (typeof data[k] === 'number' && isFinite(data[k])) {
-        // 只保底不小于 0：彩蛋奖励可重复累加，不做 99 上限截断（避免超出部分丢失）
-        w[k] = Math.max(0, Math.floor(data[k]));
+        // 只保底不小于 0、上界到安全整数：彩蛋奖励可重复累加，不做 99 上限截断（避免超出部分丢失）
+        w[k] = clampValue(data[k]);
       }
     }
     return w;
@@ -188,7 +209,7 @@
     var w = getWallet();
     var add = Math.floor(Number(n) || 0);
     if (add <= 0) return w.coins;
-    w.coins += add;
+    w.coins = clampValue(w.coins + add);   // 溢出也收敛到上限，绝不留下 Infinity（BUG-058）
     // 通关奖励不回滚：见上方口径说明
     if (!saveWallet()) lastSaveError = 'addCoins';
     return w.coins;
@@ -253,7 +274,7 @@
     var prevOwned = w[id];
     w.coins -= item.price;
     if (item.type === 'buyout') w[id] = true;
-    else w[id] = countOf(id) + 1;
+    else w[id] = clampValue(countOf(id) + 1);
     if (!saveWallet()) {
       // 写盘失败：把内存里的金币与数量一起还原，并如实告诉调用方（不是"金币不足"）
       w.coins = prevCoins;
@@ -308,7 +329,7 @@
 
     var w = getWallet();
     // 用 countOf() 读取再写回：与 buy / consumeItem 保持同一口径（兼容旧数据与损坏修复后的值）
-    w[id] = countOf(id) + add;
+    w[id] = clampValue(countOf(id) + add);
     var ok = saveWallet();
     if (!ok) lastSaveError = 'addItem';
     return ok;
@@ -325,6 +346,7 @@
   MG.Shop = {
     STORAGE_KEY: STORAGE_KEY,
     BOOST_MULTIPLIER: BOOST_MULTIPLIER,
+    MAX_WALLET_VALUE: MAX_WALLET_VALUE,
     DEFAULT_WALLET: DEFAULT_WALLET,
     ITEMS: ITEMS,
     getWallet: getWallet,

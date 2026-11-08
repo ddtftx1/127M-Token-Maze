@@ -734,16 +734,27 @@
     var label = els['checkin-entry-label'];
     var iconBox = els['checkin-entry-icon'];
 
+    /* 时钟异常（第 1~2 天，尚未触发自愈）：今天其实**没有签上**，不能沿用「今日已签到」
+       —— 玩家点进去看到的是"系统时间异常、不予发放"，角标与内容对不上（BUG-060，
+       2026-11-09 用户拍板）。这里给一句如实的「系统时间异常」，图标也从对勾换成锁。 */
+    var clockBlocked = (!plan.canClaim && plan.reason === 'clock');
+
     if (dot) {
       if (plan.canClaim) dot.classList.remove('hidden');
       else dot.classList.add('hidden');
     }
-    if (label) label.textContent = plan.canClaim ? '每日签到' : '今日已签到';
+    if (label) {
+      label.textContent = plan.canClaim
+        ? '每日签到'
+        : (clockBlocked ? '系统时间异常' : '今日已签到');
+    }
     if (btn.classList) {
       if (plan.canClaim) btn.classList.remove('is-claimed');
       else btn.classList.add('is-claimed');
     }
-    if (iconBox) iconBox.innerHTML = icon(plan.canClaim ? 'alarm' : 'check');
+    if (iconBox) {
+      iconBox.innerHTML = icon(plan.canClaim ? 'alarm' : (clockBlocked ? 'lock' : 'check'));
+    }
   }
 
   /** 竖屏？老内核没有 matchMedia 时按宽高比兜底 */

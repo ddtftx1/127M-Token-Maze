@@ -245,7 +245,33 @@
       // Web Audio 对 NaN 参数会抛 TypeError（gamma/指数曲线），表现就是"点了没声音"
       var k = (typeof intensity === 'number' && isFinite(intensity)) ? intensity : 1;
       var v = Math.max(0.02, Math.min(0.14, k * 0.14));
-      tone({ freq: 180, freq2: 240, type: 'sine', dur: 0.9, vol: v });
+      /* BUG-061（2026-11-09 用户反馈："开发者面板里 MG.Audio.portal() 不发声，
+         但仍提示已播放"）：
+         把 11 个音效逐个离线渲染做频谱对比后确认 —— 本音是**唯一一个 300 Hz 以上
+         零能量**的（180→240 Hz 纯正弦，能量 100% 落在 50~300 Hz），而手机小喇叭
+         在 300 Hz 以下几乎不发声、`error` 那种低频方波还有谐波撑着；
+         于是"波形确实排进了音频图、代码没抛错"，但用户耳朵里是静音。
+         修法：基音改三角波（自带 3f / 5f 奇次谐波），再叠八度与十二度两个泛音 ——
+         保留"低频低鸣"的音色定位，同时让手机也能听见；峰值仍在其它音效同一量级。 */
+      tone({ freq: 180, freq2: 240, type: 'triangle', dur: 0.9, vol: v });                                  // 基音：低鸣本体
+      tone({ freq: 360, freq2: 480, type: 'sine', dur: 0.9, vol: Math.min(0.11, v * 0.8) });                // 八度泛音
+      tone({ freq: 540, freq2: 720, type: 'sine', dur: 0.9, vol: Math.min(0.07, v * 0.5) });                // 十二度泛音：落在手机喇叭能重放的频段
+    },
+
+    /**
+     * 诊断信息（开发者面板用；只读、不会创建上下文）。
+     * 起因同上：面板原先无条件提示"已播放"，而音频上下文没解锁/被挂起时
+     * tone() 会直接放弃本次发音 —— 那句提示就成了假消息。有了这个出口，
+     * 面板可以如实说明"调用了，但上下文当前是 suspended，本次不会出声"。
+     * @returns {{created:boolean, ctxState:string, volume:number}}
+     *   ctxState: 'running' | 'suspended' | 'closed' | 'interrupted' | 'none'
+     */
+    diagnostics: function () {
+      return {
+        created: !!ctx,
+        ctxState: ctx ? ctx.state : 'none',
+        volume: currentVolume()
+      };
     }
   };
 

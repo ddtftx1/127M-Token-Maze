@@ -47,7 +47,10 @@
   /** 不发声的工具方法（unlock 只做 resume，syncVolume 只设增益） */
   var AUDIO_UTIL = ['unlock', 'syncVolume'];
   /** 带节流的音效：短时间内连点会被内部丢弃，不是坏了 */
-  var AUDIO_THROTTLED = { step: '380ms 节流（防脚步叠音）' };
+  var AUDIO_THROTTLED = {
+    step: '380ms 节流（防脚步叠音）',
+    portal: '0.9s 低频低鸣（贴近终点才明显；已加泛音，手机喇叭可闻）'
+  };
   /** 图标 key → 用途说明（与 js/icons.js 的顺序一致） */
   var ICON_LABELS = {
     trophy: '排行榜 / 成就', shop: '商店', map: '小地图', bag: '道具背包',
@@ -244,6 +247,18 @@
     audioBackup = null;
   }
 
+  /**
+   * 读取真实音频诊断信息。
+   * 必须优先走备份：面板打开期间 MG.Audio 的方法（含 diagnostics）会被整体替换成空函数，
+   * 直接调 MG.Audio.diagnostics() 只会拿到 undefined。返回 null 表示拿不到（旧版 audio.js）。
+   */
+  function audioDiag() {
+    var fn = (audioBackup && audioBackup.diagnostics) ||
+             (MG.Audio && typeof MG.Audio.diagnostics === 'function' ? MG.Audio.diagnostics : null);
+    if (typeof fn !== 'function') return null;
+    try { return fn(); } catch (e) { return null; }
+  }
+
   /** 音频页专用：绕过面板静音，调用"进面板前"的真实方法 */
   function playAudioRaw(name) {
     var mute = audioMuteReason();
@@ -258,9 +273,26 @@
       setStatus('err', 'MG.Audio.' + name + ' 不存在');
       return;
     }
+    /* 如实反馈（BUG-061）：音频上下文没解锁 / 被挂起时，audio.js 的 tone() 会**直接放弃**
+       本次发音（为了不在解锁瞬间齐发，它刻意不排队），此时再报"已播放"就是假消息 ——
+       用户 2026-11-09 反馈的就是"portal 不响，但仍提示已播放"。
+
+       判定要用**调用前**的状态：tone() 在挂起时会顺手调一次 resume()，真实浏览器里
+       resume() 是异步的、但状态可能很快就不是 suspended 了 —— 只看调用后会把"这次其实没出声"
+       误判成成功。调用前若已是非 running，就一定是被放弃的那一次。 */
+    var before = audioDiag();
     try {
       fn();
-      setStatus('ok', '已播放 MG.Audio.' + name + '()');
+      var after = audioDiag();
+      var st = null;
+      if (before && before.created && before.ctxState !== 'running') st = before.ctxState;
+      else if (after && after.created && after.ctxState !== 'running') st = after.ctxState;
+      if (st) {
+        setStatus('err', '已调用 MG.Audio.' + name + '()，但音频上下文是「' + st +
+          '」，本次不会出声：先点一下页面任意处（需要用户手势解锁）再试');
+      } else {
+        setStatus('ok', '已播放 MG.Audio.' + name + '()');
+      }
     } catch (e) {
       setStatus('err', '播放 ' + name + ' 抛错：' + (e && e.message ? e.message : e));
     }
@@ -594,13 +626,22 @@
       '<div class="dev-btn-grid">' + utilBtns + '</div>' +
       '<p class="dev-hint">unlock() 负责用用户手势唤醒 AudioContext；syncVolume() 只把总增益同步到当前设置。</p>');
 
+    var diag = audioDiag();
+    var ctxText = diag
+      ? (diag.created ? diag.ctxState : '尚未创建（需要一次用户手势）')
+      : '未加载';
+    var ctxWarn = (diag && diag.created && diag.ctxState !== 'running')
+      ? '<div class="dev-warn">音频上下文当前是「' + esc(diag.ctxState) +
+        '」：试听按钮会提示"已调用但不会出声"。先点一下页面任意处解锁，再回来重试。</div>'
+      : '';
     html += card('当前音频状态', '面板静音只发生在面板打开期间，退出即恢复；不写设置',
       '<div class="dev-kv">' +
         kv('sfx 设置', (MG.Settings && MG.Settings.get().sfx) ? '开' : '关') +
         kv('volume 设置', String(MG.Settings ? MG.Settings.get().volume : '-')) +
-        kv('AudioContext', (MG.Audio && typeof MG.Audio.unlock === 'function')
-          ? (audioBackup ? '面板内已静音（方法被包装）' : '正常') : '未加载') +
-      '</div>');
+        kv('AudioContext', ctxText) +
+        kv('实际总增益', diag ? String(diag.volume) : '-') +
+        kv('面板内方法', audioBackup ? '已被静音包装（试听按钮走备份）' : '正常') +
+      '</div>' + ctxWarn);
     box.innerHTML = html;
   }
 

@@ -1864,6 +1864,11 @@
       updateHudData();
     }
 
+    // 小地图大小（BUG-062）→ 立刻重新测量并按新尺寸重设画布分辨率
+    if (evt.key === 'minimapSize' || evt.reset) {
+      if (MG.UI.refreshMinimapSize) MG.UI.refreshMinimapSize();
+    }
+
     // 「小地图显示全部金币」→ 强制下一次主循环立即重绘小地图，切换即时生效
     if (evt.key === 'minimapCoins') {
       lastMapDraw = 999;

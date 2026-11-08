@@ -26,6 +26,27 @@
   --theme-floor: #0e1622;
   --theme-fog: #05070c;
   --theme-sky: #0a1420;
+  /* 小地图尺寸（BUG-062，2026-11-09）：
+     原先写死 min(34vw, 168px)，只要视口高 >720px，34vw 就超过 168px，于是**永远卡在上限**——
+     1080p 桌面只有屏宽的 8.7%、笔记本 1366×768 是 12.3%，跟难度无关地"小得看不清"。
+     现在改成随视口比例自适应 + 合理上下限；玩家在设置里选了小/中/大时由
+     body[data-minimap-size] 覆盖（见下方三条），选「自动」则不设该属性、用这里的公式。 */
+  --minimap-size: 168px;                                     /* 老内核兜底（不支持 min/clamp 时用它） */
+  --minimap-size: clamp(120px, min(34vw, 34vh), 320px);       /* 自动：随屏幕比例（手机保持原尺寸） */
+}
+
+/* 小地图尺寸：玩家手动档位（设置面板 → 小地图大小）。auto 时不设属性，走 :root 的自适应公式 */
+body[data-minimap-size="small"] {
+  --minimap-size: 96px;
+  --minimap-size: clamp(96px, 20vmin, 180px);
+}
+body[data-minimap-size="medium"] {
+  --minimap-size: 120px;
+  --minimap-size: clamp(120px, 26vmin, 260px);
+}
+body[data-minimap-size="large"] {
+  --minimap-size: 140px;
+  --minimap-size: clamp(140px, 34vmin, 360px);
 }
 
 /* 地牢主题 */
@@ -493,10 +514,9 @@ html, body {
 
 .minimap-wrap {
   position: relative;
-  width: 168px;                           /* Chrome 49 降级值（不支持 min） */
-  height: 168px;
-  width: min(34vw, 168px);
-  height: min(34vw, 168px);
+  /* 尺寸统一由 --minimap-size 给（见文件头的 :root 与 body[data-minimap-size] 覆盖） */
+  width: var(--minimap-size);
+  height: var(--minimap-size);
 }
 
 #minimap {
@@ -746,6 +766,13 @@ html, body {
 .switch:checked::after { transform: translateX(24px); }
 .switch:disabled { opacity: 0.4; cursor: not-allowed; }
 
+.setting-hint {
+  margin: -4px 0 10px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-dim);
+  text-align: left;
+}
 .setting-lock {
   margin-left: 6px;
   padding: 1px 8px;
@@ -1290,7 +1317,12 @@ html, body {
   .compass-arrow { width: 11px; height: 16px; }
   .compass-needle { width: 8px; height: 13.5px; }
   .compass-dist { font-size: 10px; }
-  .minimap-wrap { width: 132px; height: 132px; width: min(26vh, 132px); height: min(26vh, 132px); }
+  /* 横屏矮屏改 :root 的自动公式（不改 .minimap-wrap 本身，否则元素级声明会盖掉
+     body[data-minimap-size] 的手动档位 —— 玩家在设置里选了大小就该说了算） */
+  :root {
+    --minimap-size: 132px;
+    --minimap-size: clamp(96px, min(30vw, 30vh), 320px);
+  }
   #minimap { border-radius: 12px; }
 
   /* 极矮横屏（320 / 360 高）小地图缩小后，锁定占位文案与提示要能完整显示 */

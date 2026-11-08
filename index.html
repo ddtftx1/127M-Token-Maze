@@ -223,6 +223,17 @@
             <label for="set-minimap-coins">小地图显示全部金币</label>
             <input id="set-minimap-coins" class="switch" type="checkbox" />
           </div>
+          <!-- 小地图大小（BUG-062）：默认「自动」随屏幕比例伸缩；不合适的玩家可以在这里改 -->
+          <div class="setting-row switch-row">
+            <label for="set-minimap-size">小地图大小 <span id="set-minimap-size-state" class="setting-lock">自动</span></label>
+            <select id="set-minimap-size" class="select-input">
+              <option value="auto">自动（按屏幕比例）</option>
+              <option value="small">小</option>
+              <option value="medium">中</option>
+              <option value="large">大</option>
+            </select>
+          </div>
+          <p class="setting-hint">电脑 / 平板上的小地图会按屏幕比例自动放大；觉得太大或太小，随时改这里。</p>
           <div class="setting-row switch-row">
             <label for="set-theme-select">主题</label>
             <select id="set-theme-select" class="select-input">

@@ -31,6 +31,7 @@
     fog: true,            // 雾效开关
     minimap: true,        // 小地图开关
     minimapCoins: false,  // 小地图显示全部金币位置（未探索用轮廓）
+    minimapSize: 'auto',  // 小地图大小（BUG-062）：auto=按屏幕比例 | small | medium | large
     volume: 0.6,          // 音量 0~1
     sfx: true,            // 音效开关
     theme: 'tech',        // 主题 tech | dungeon | forest
@@ -99,6 +100,8 @@
     if (typeof data.fog === 'boolean') settings.fog = data.fog;
     if (typeof data.minimap === 'boolean') settings.minimap = data.minimap;
     if (typeof data.minimapCoins === 'boolean') settings.minimapCoins = data.minimapCoins;
+    // 小地图大小：只接受合法枚举，非法值（手改档 / 旧版本写入）保持原值
+    if (['auto', 'small', 'medium', 'large'].indexOf(data.minimapSize) >= 0) settings.minimapSize = data.minimapSize;
     if (typeof data.volume === 'number' && isFinite(data.volume)) settings.volume = clamp(data.volume, 0, 1);
     if (typeof data.sfx === 'boolean') settings.sfx = data.sfx;
     if (['tech', 'dungeon', 'forest'].indexOf(data.theme) >= 0) settings.theme = data.theme;

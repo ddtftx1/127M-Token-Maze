@@ -177,6 +177,7 @@
     }
     resetMinimapCache();   // 尺寸变了：静态缓存签名 / 坐标统计全部作废
     minimapResizePending = false;
+    updateMinimapSizeBadge();   // 实际像素变了，设置面板的徽标同步（BUG-062）
     return true;
   }
 
@@ -203,7 +204,7 @@
       'settings-panel', 'set-fov', 'val-fov', 'set-sensitivity', 'val-sensitivity',
       'set-invert-yaw', 'set-invert-pitch', 'set-speed', 'val-speed',
       'set-quality-select', 'set-shadows', 'set-fog', 'set-minimap-toggle', 'set-minimap-state',
-      'set-minimap-coins',
+      'set-minimap-coins', 'set-minimap-size', 'set-minimap-size-state',
       'set-theme-select', 'set-colorblind', 'set-volume', 'val-volume', 'set-sfx', 'set-ghost-select',
       'btn-settings-reset', 'btn-settings-back',
       'win-screen', 'win-newrecord', 'win-time', 'win-steps',
@@ -272,6 +273,8 @@
     bindReplayBar();
     syncSettingsUI();
     applyThemeToBody();
+    // 小地图尺寸档位（BUG-062）：auto 时清掉 body 属性、走 CSS 的自适应公式
+    applyMinimapSizeToBody();
     refreshRecords();
     refreshAchievements();
   }
@@ -1273,6 +1276,7 @@
 
     // 下拉框
     bindSelect('set-quality-select', 'quality');
+    bindSelect('set-minimap-size', 'minimapSize');
     bindSelect('set-theme-select', 'theme');
     bindSelect('set-ghost-select', 'ghostMode');
 
@@ -1346,6 +1350,8 @@
     setCheck('set-sfx', s.sfx);
 
     setValue('set-quality-select', s.quality);
+    setValue('set-minimap-size', s.minimapSize || 'auto');
+    applyMinimapSizeToBody();
     setValue('set-theme-select', s.theme);
     setValue('set-ghost-select', s.ghostMode);
 
@@ -1372,6 +1378,47 @@
     else delete document.body.dataset.colorblind;
     // 主题 / 色盲配色变化会影响小地图静态内容，立即失效缓存
     invalidateMinimapCache();
+  }
+
+  /* ------------------------------------------------------------
+   * 小地图大小（BUG-062，2026-11-09）
+   * ------------------------------------------------------------
+   * 背景：尺寸原先写死 min(34vw, 168px)，视口一高过 720px 就被 168px 上限钉住，
+   * 于是桌面/平板（1080p 只有屏宽 8.7%）"任何难度都小得看不清"。
+   * 现在：CSS 用 --minimap-size 做自适应（见 style.css 文件头），这里只负责
+   * ① 把玩家的档位写进 body[data-minimap-size]；② 立刻按新尺寸重设画布分辨率；
+   * ③ 在设置面板的徽标上如实显示"当前档位 · 实际像素"，让玩家知道能调、调了多大。
+   * ---------------------------------------------------------- */
+
+  /** 应用「小地图大小」档位到 body（auto 不设属性，走 CSS 自适应公式） */
+  function applyMinimapSizeToBody() {
+    var mode = S.get().minimapSize || 'auto';
+    if (mode === 'auto') delete document.body.dataset.minimapSize;
+    else document.body.dataset.minimapSize = mode;
+    updateMinimapSizeBadge();
+  }
+
+  /** 设置面板徽标：当前档位 + 实际像素（没测量到尺寸时只显示档位） */
+  function updateMinimapSizeBadge() {
+    var node = el['set-minimap-size-state'];
+    if (!node) return;
+    var mode = S.get().minimapSize || 'auto';
+    var label = mode === 'auto' ? '自动'
+      : (mode === 'small' ? '小' : (mode === 'medium' ? '中' : '大'));
+    if (mapSize > 0) label += ' · ' + mapSize + 'px';
+    if (node.textContent !== label) node.textContent = label;
+  }
+
+  /**
+   * 尺寸档位变化 / 屏幕变化后立刻生效：重新测量容器并按 dpr 重设画布。
+   * 容器隐藏（不在对局中 / 未解锁）时量不到宽度，交给下一次 drawMinimap 兜底。
+   */
+  function refreshMinimapSize() {
+    // 档位 → body 属性（CSS 变量靠它覆盖自适应公式）；先做这一步，
+    // 再重设画布分辨率。写成"唯一入口"是为了避免出现"徽标变了但尺寸没变"这种半生效状态。
+    applyMinimapSizeToBody();
+    if (!resizeMinimap()) minimapResizePending = true;
+    updateMinimapSizeBadge();
   }
 
   /* ------------------------------------------------------------
@@ -2004,6 +2051,8 @@
     setSelectedDiff: setSelectedDiff,
     setSeed: setSeed,
     applyThemeToBody: applyThemeToBody,
+    applyMinimapSizeToBody: applyMinimapSizeToBody,
+    refreshMinimapSize: refreshMinimapSize,
     // 小地图锁定 / 排行榜 / 回放
     updateMinimapLock: updateMinimapLock,
     resetMinimapCache: resetMinimapCache,

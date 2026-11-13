@@ -823,7 +823,13 @@
   function closePanel() {
     panelOpen = false;
     if (tickTimer) { clearInterval(tickTimer); tickTimer = null; }
-    if (MG.UI && MG.UI.showMainMenu) MG.UI.showMainMenu();
+    /* BUG-064（2026-11-13）：返回落点交给 UI 层统一判定 ——
+       签到面板既可从主菜单进，也可在对局暂停中经开发者面板的「快速跳转 → 签到」
+       （以及数据页的「打开签到面板」）进；从暂停局进来时若直接 showMainMenu()，
+       主菜单会盖在一局 state === 'paused' 的僵尸对局上（背景还是那一局）。
+       ui.js 比本模块先加载，正常一定存在；万一取不到就退回修复前的行为，保持可降级。 */
+    if (MG.UI && MG.UI.backFromOverlay) MG.UI.backFromOverlay();
+    else if (MG.UI && MG.UI.showMainMenu) MG.UI.showMainMenu();
     else if (MG.UI && MG.UI.hide) MG.UI.hide('checkin-screen');
   }
 

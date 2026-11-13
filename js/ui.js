@@ -323,6 +323,46 @@
   function showPause() { show('pause-menu'); }
   function hidePause() { hide('pause-menu'); }
 
+  /* ------------------------------------------------------------
+   * 覆盖层界面的「返回」落点（BUG-064，2026-11-13）
+   * ------------------------------------------------------------
+   * 商店 / 排行榜 / 成就 / 签到 这四个界面既可以从主菜单进，也可以在对局**暂停中**
+   * 经开发者面板的「环境 → 快速跳转」进。返回时必须回到"进来时的那一层"：
+   * 从暂停局进来却直接 showMainMenu()，主菜单就会盖在一局 state === 'paused' 的
+   * 僵尸对局上 —— 背景还是那一局的画面（关卡资源也没释放），HUD 与暂停菜单都不显示。
+   * 这与 BUG-056（快速跳转 → 设置）是同一族缺陷，当初只修了"设置"那一条。
+   *
+   * 口径（用户 2026-11-13 拍板）：对局中点到的「返回」永远回暂停菜单；
+   * 只有明确的「返回主菜单」按钮（暂停菜单的按钮 / 开发者面板的「主菜单」跳转）才回主菜单。
+   *
+   * 判定放在"点返回的那一刻"用 Game.state 现算，而不是像 settingsFrom 那样记录来源：
+   * 只要没有东西能在面板开着时改掉 Game.state，现算就既够用、又不会引入"来源记错"的第二个缺陷。
+   * 这也是为什么 ESC / P 必须走同一条返回路径（见 main.js 的 onPause 链里 isOverlayOpen 分支）——
+   * 那条链原先会让覆盖层里的 ESC 落到 resumeGame()，把对局恢复成 playing 而面板还开着，
+   * 于是"面板开着 + 状态被改掉"真的发生了（BUG-064 复查时发现，一并修掉）。
+   * ---------------------------------------------------------- */
+
+  /** 当前是否停在一局已暂停的对局里（覆盖层返回的判据） */
+  function isPausedGame() {
+    return !!(MG.game && MG.game.state === 'paused');
+  }
+
+  /** 覆盖层面板（商店 / 排行榜 / 成就 / 签到）的统一返回落点 */
+  function backFromOverlay() {
+    if (isPausedGame()) {
+      // 回暂停菜单：先清掉所有界面，再把 HUD 与暂停菜单摆回来。
+      // HUD 必须显式 show —— 现在这四条路径上都只走 hideAllScreens（名单里没有 hud），
+      // 但只要有任一路径曾经过 showMainMenu（那里会 hide('hud')），不补这一句就会变成
+      // "回到了暂停菜单，HUD 却永久消失"（与 closeSettings 的 hud 分支同一个防御理由）。
+      hideAllScreens();
+      show('hud');
+      show('pause-menu');
+      return;
+    }
+    // 从主菜单进来的：行为与修复前完全一致（含成绩 / 成就列表刷新）
+    showMainMenu();
+  }
+
   /** 显示加载界面 */
   function showLoading(text, progress) {
     hideAllScreens();
@@ -368,6 +408,22 @@
   function isSettingsOpen() {
     var node = el['settings-panel'];
     return !!(node && !node.classList.contains('hidden'));
+  }
+
+  /**
+   * 商店 / 排行榜 / 成就 覆盖层是否正开着（供 ESC / P 键判断优先级，BUG-064）。
+   * 签到面板不列在这里：main.js 的 ESC 链里本来就有它自己的分支（要先清倒计时定时器）。
+   */
+  function isOverlayOpen() {
+    // 彩蛋验证弹窗浮在这些界面之上，并且自己绑了 ESC 关闭：那一下 ESC 交给它，
+    // 不要顺手把底下的界面也一起关掉（逐层关闭，与签到 / 道具 / 设置的手感一致）
+    if (el['secret-modal'] && !el['secret-modal'].classList.contains('hidden')) return false;
+    var ids = ['shop-screen', 'ranking-screen', 'achievement-screen'];
+    for (var i = 0; i < ids.length; i++) {
+      var node = document.getElementById(ids[i]);
+      if (node && !node.classList.contains('hidden')) return true;
+    }
+    return false;
   }
 
   /** 显示胜利界面 */
@@ -644,8 +700,8 @@
     if (el['btn-ranking-back']) {
       el['btn-ranking-back'].addEventListener('click', function () {
         playClick();
-        hide('ranking-screen');
-        showMainMenu();
+        // 落点统一判定：暂停局 → 暂停菜单，否则 → 主菜单（BUG-064）
+        backFromOverlay();
       });
     }
   }
@@ -671,8 +727,8 @@
     if (el['btn-achievements-back']) {
       el['btn-achievements-back'].addEventListener('click', function () {
         playClick();
-        hide('achievement-screen');
-        showMainMenu();
+        // 落点统一判定：暂停局 → 暂停菜单，否则 → 主菜单（BUG-064）
+        backFromOverlay();
       });
     }
   }
@@ -780,8 +836,8 @@
     if (el['btn-shop-back']) {
       el['btn-shop-back'].addEventListener('click', function () {
         playClick();
-        hide('shop-screen');
-        showMainMenu();
+        // 落点统一判定：暂停局 → 暂停菜单，否则 → 主菜单（BUG-064）
+        backFromOverlay();
       });
     }
     if (el['shop-list']) {
@@ -2032,11 +2088,13 @@
     showGame: showGame,
     showPause: showPause,
     hidePause: hidePause,
+    backFromOverlay: backFromOverlay,
     showLoading: showLoading,
     setLoadingProgress: setLoadingProgress,
     showSettings: showSettings,
     closeSettings: closeSettings,
     isSettingsOpen: isSettingsOpen,
+    isOverlayOpen: isOverlayOpen,
     showWin: showWin,
     updateHud: updateHud,
     drawMinimap: drawMinimap,

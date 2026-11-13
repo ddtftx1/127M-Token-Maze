@@ -2000,6 +2000,13 @@
       // 设置面板开启时：优先关闭它。否则 ESC 会走进下面的 resumeGame() 分支，
       // 只把 state 切回 playing 而不隐藏面板，游戏会在面板背后继续跑（BUG-016）
       if (MG.UI.isSettingsOpen && MG.UI.isSettingsOpen()) { MG.UI.closeSettings(); return; }
+      /* 商店 / 排行榜 / 成就 覆盖层开启时（BUG-064）：优先关面板，落点与鼠标点「返回」一致
+         （暂停局 → 暂停菜单，否则 → 主菜单）。没有这一分支时 ESC / P 会落到下面的
+         resumeGame()：把 state 变回 playing 而面板还开着 —— 与 BUG-016 同一类问题；
+         更糟的是玩家随后点「返回」时 Game.state 已是 playing，返回落点会算成主菜单，
+         对局就在主菜单背后继续跑，甚至后台走到终点触发结算，
+         凭空写入排行榜 / 回放 / 钱包（正是 js/dev.js 打开面板前必须暂停那段注释警告过的情形）。 */
+      if (MG.UI.isOverlayOpen && MG.UI.isOverlayOpen()) { MG.UI.backFromOverlay(); return; }
       if (Game.state === 'replay') exitReplay();
       else if (Game.state === 'playing') pauseGame();
       else if (Game.state === 'paused') resumeGame();

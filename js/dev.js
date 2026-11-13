@@ -1337,7 +1337,21 @@
     // 把一局 state==='paused' 的对局盖在下面（导航不一致，见 BUG(2026.11.08) 的 BUG-052）。
     var wasPaused = pauseResume;
     close(true);
-    if (target === 'menu' && MG.UI) MG.UI.showMainMenu();
+    /* BUG-064（2026-11-13）：「主菜单」这一跳必须真正结束对局。
+       原来无条件 MG.UI.showMainMenu()，于是从对局（暂停态 / 胜利界面）点「主菜单」时，
+       主菜单会盖在一局还没释放的关卡上：state 仍是 paused/win、mazeView 还在、
+       背景还是那一局的画面（与 BUG-056 同一族，那条只修了"设置"一条路径）。
+       存在活关卡时改走引擎的 backToMenu()（MG.UI.pauseCallbacks.onMenu）——
+       它会释放关卡、把 state 归 menu、清掉关卡遗留的雾与背景色，
+       与暂停菜单里的「返回主菜单」按钮走完全同一条路径。 */
+    if (target === 'menu' && MG.UI) {
+      var hasLiveLevel = !!(MG.Game && MG.Game.mazeView);
+      if (hasLiveLevel && MG.UI.pauseCallbacks && MG.UI.pauseCallbacks.onMenu) {
+        MG.UI.pauseCallbacks.onMenu();
+      } else {
+        MG.UI.showMainMenu();
+      }
+    }
     else if (target === 'shop' && MG.UI) MG.UI.openShop();
     else if (target === 'ach' && MG.UI) MG.UI.openAchievements();
     else if (target === 'rank' && MG.UI) MG.UI.openRanking();

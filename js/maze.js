@@ -16,6 +16,16 @@
   /** 单元格世界尺寸（米） */
   var CELL = 2.0;
 
+  /**
+   * 布局版本（BUG-067，2026-11-14）。
+   * 终点位置规则 / 关卡布局**一变就 +1**；回放与幽灵用它判断"同 seed 的旧记录是否还适用"
+   * （见 js/replay.js 的 load / prune）。v1 = 终点固定右下角；v2 = 远端随机。
+   */
+  var LAYOUT_VERSION = 2;
+
+  /** 终点候选门槛的兜底值：路径步数 ≥ 0.8 × 本局最远路径步数（各难度可用 endFarRatio 覆盖） */
+  var DEFAULT_END_FAR_RATIO = 0.8;
+
   /* ------------------------------------------------------------
    * 难度配置
    * ---------------------------------------------------------- */
@@ -28,7 +38,9 @@
       fogColorHex: 0x0a1420,
       autoPathMax: Infinity, // 预留，当前未使用（自动寻路无限次）
       autoPathCooldown: 5,   // 预留，当前未使用（冷却很短）
-      farCell: false,        // 终点距离策略：false=对角，true=额外更远
+      /* 终点候选门槛（BUG-067）：从起点出发的**路径步数** ≥ 0.8 × 本局最远路径步数，
+         在这个候选区间里按种子随机取，不再固定右下角。数值越大终点越远、越难。 */
+      endFarRatio: 0.8,
       coins: 3,
       ceiling: true,
       color: 0x2a4a6b
@@ -41,7 +53,7 @@
       fogColorHex: 0x081018,
       autoPathMax: 3,        // 预留，当前未使用
       autoPathCooldown: 30,  // 预留，当前未使用
-      farCell: true,
+      endFarRatio: 0.8,
       coins: 6,
       ceiling: true,
       color: 0x2f5578
@@ -54,7 +66,7 @@
       fogColorHex: 0x040a12,
       autoPathMax: 1,        // 预留，当前未使用
       autoPathCooldown: 60,  // 预留，当前未使用
-      farCell: true,
+      endFarRatio: 0.8,
       coins: 10,
       ceiling: true,
       color: 0x35507a
@@ -236,45 +248,120 @@
   }
 
   /**
-   * 选取起点与终点
-   * 起点固定左上角单元格（1,1），终点默认右下角；
-   * farCell=true 时在若干候选点里挑一个曼哈顿距离最远的格子（更远）
+   * 从起点出发的 BFS 步数表（-1 = 不可达）。
+   * 用于终点候选的"真实路径距离"判定 —— 旧实现用曼哈顿距离近似，在迷宫里并不成立
+   * （两个格子可能只隔一堵墙、却要绕十几步）。
+   * 自带一份最小实现而不是调 MG.Path.bfs：模块加载顺序是 maze.js → pathfinding.js，
+   * maze.js 不能反向依赖后面的模块。31×31 也就 961 格，开销可忽略。
    */
-  function pickEndpoints(maze, farCell) {
+  function bfsSteps(grid, size, start) {
+    var dist = new Int32Array(size * size);
+    var i;
+    for (i = 0; i < dist.length; i++) dist[i] = -1;
+    var queue = [start.y * size + start.x];
+    dist[queue[0]] = 0;
+    for (var h = 0; h < queue.length; h++) {
+      var idx = queue[h];
+      var cx = idx % size;
+      var cy = (idx - cx) / size;
+      var d = dist[idx];
+      if (cx > 0 && grid[idx - 1] === 0 && dist[idx - 1] < 0) { dist[idx - 1] = d + 1; queue.push(idx - 1); }
+      if (cx < size - 1 && grid[idx + 1] === 0 && dist[idx + 1] < 0) { dist[idx + 1] = d + 1; queue.push(idx + 1); }
+      if (cy > 0 && grid[idx - size] === 0 && dist[idx - size] < 0) { dist[idx - size] = d + 1; queue.push(idx - size); }
+      if (cy < size - 1 && grid[idx + size] === 0 && dist[idx + size] < 0) { dist[idx + size] = d + 1; queue.push(idx + size); }
+    }
+    return dist;
+  }
+
+  /* ------------------------------------------------------------
+   * 起点与终点（BUG-067，2026-11-14 重做终点规则）
+   * ------------------------------------------------------------
+   * 旧实现的问题：end 默认 (size-2, size-2)，`farCell=true` 时"取曼哈顿距离最远的通路格"——
+   * 而曼哈顿距离 |x-1|+|y-1| 在 (size-2, size-2) 取到**唯一最大值**，于是那个分支永远返回
+   * 同一个角。实测三档各 200 局：终点 100% 是 (9,9) / (19,19) / (29,29)，farCell 是死逻辑。
+   * 后果：玩家只要记住"终点永远在右下角"，就能一路往东南推算着走 —— 迷宫的探索意义被架空
+   * （用户 2026-11-14 反馈：朋友试玩后说这样能轻松速通）。
+   *
+   * 新规则（用户拍板口径：随机于"路径距离 ≥ 80% 最远"的通路格）：
+   *   ① BFS 算出每个通路格的**真实路径步数**；
+   *   ② 候选 = 路径步数 ≥ ratio × 本局最远路径步数 的通路格（可达性由 BFS 天然保证）；
+   *   ③ 用**由 seed 派生的独立随机流**挑选，从而：
+   *      - 同一个 seed 恒得同一个终点 → 每日挑战世界同步、幽灵与回放可复现；
+   *      - **不消费 maze.rng**：金币与地图卷轴是在 MazeView.build() 里接着 maze.rng 抽的，
+   *        多抽几笔会让它们整体错位；用独立流后，同 seed 的差异只来自"终点格被排除出候选集合"
+   *        这一格（见下方「与金币/卷轴的关系」）。
+   *   ④ 先按该随机流选一个**象限**，再在象限内均匀挑 —— 远端格子天然集中在东南，
+   *      直接全局均匀取会让东南占约 38%；按象限分层后四个象限大致均衡。
+   *
+   * ── 与金币 / 地图卷轴的关系（别误解）──
+   * 独立随机流只保证"**随机序列**没有被这次改动多推进"，**不等于**同 seed 的金币位置完全不变：
+   * pickCoinSpots / pickMapSpot 都会把终点格排除出候选集合，终点一变候选集合就差一格，
+   * 而候选集合是要洗牌的 —— 差一格会让洗牌结果整体不同。实测同 seed 下会有 1~3 枚金币换位。
+   * 这属于"关卡布局变化"的一部分，已由 LAYOUT_VERSION 统一作废旧回放（js/replay.js）。
+   * 想要金币完全稳定就得让金币选择不再依赖终点（可能把金币放到传送门上），代价不值得。
+   *
+   * 刻意**不做**"不与上一局同象限"：那要记住上一局的落点，同 seed 的布局就会随玩家历史变化，
+   * 直接破坏"同 seed 同布局"（每日挑战世界同步、幽灵/回放都依赖它）。
+   * 用 seed 派生象限后，既不可预测、又完全确定。
+   * ---------------------------------------------------------- */
+
+  /**
+   * 选取起点与终点
+   * 起点固定左上角单元格（1,1）；终点在"远端候选格"里按 seed 派生的随机流挑选。
+   * @param {Object} maze generate() 的返回值（用到 grid / size / seed）
+   * @param {number} [farRatio] 候选门槛：路径步数 ≥ farRatio × 最远路径步数（默认 0.8）
+   */
+  function pickEndpoints(maze, farRatio) {
     var size = maze.size;
     var start = { x: 1, y: 1 };
-    var end = { x: size - 2, y: size - 2 };
+    var corner = { x: size - 2, y: size - 2 };
+    var ratio = (typeof farRatio === 'number' && isFinite(farRatio)) ? farRatio : DEFAULT_END_FAR_RATIO;
+    if (ratio < 0) ratio = 0;
+    if (ratio > 1) ratio = 1;
 
-if (farCell) {
-  // 在通路格中挑离起点最远的（曼哈顿距离）
-  // 约束 x + y > size * 0.5：只在"偏后半区"的通路格里挑，避免终点落在起点附近；
-  // 用 size 的一半而不是更严格的值，保证小迷宫（cells=5 → size=11）里也有足够的候选格。
-  var best = null, bestD = -1;
-  var halfSum = size * 0.5;
-        for (var y = 1; y < size - 1; y += 2) {
-        for (var x = 1; x < size - 1; x += 2) {
-          if (maze.grid[y * size + x] !== 0) continue;
-          var d = Math.abs(x - start.x) + Math.abs(y - start.y);
-          if (d > bestD && x + y > halfSum) { bestD = d; best = { x: x, y: y }; }
-        }
+    var dist = bfsSteps(maze.grid, size, start);
+    var maxD = 0, i;
+    for (i = 0; i < dist.length; i++) if (dist[i] > maxD) maxD = dist[i];
+    // 极端兜底：起点周围一个可达格都没有（生成器保证不会出现）
+    if (maxD <= 0) return { start: start, end: corner };
+
+    // 候选：仅"单元格中心"（奇数坐标，与旧的取格口径一致），且路径步数达门槛
+    var pool = [];
+    for (var y = 1; y < size - 1; y += 2) {
+      for (var x = 1; x < size - 1; x += 2) {
+        if (maze.grid[y * size + x] !== 0) continue;
+        if (dist[y * size + x] < ratio * maxD) continue;   // 不可达格 dist = -1，天然被排除
+        pool.push({ x: x, y: y });
       }
-      if (best) end = best;
+    }
+    // 门槛过高导致候选为空（例如人为把 ratio 设成 1 而最远格恰好不可用）：退化为全局最远格
+    if (pool.length === 0) {
+      var best = null, bestD = -1;
+      for (i = 0; i < dist.length; i++) {
+        if (dist[i] > bestD) { bestD = dist[i]; best = i; }
+      }
+      if (best === null) return { start: start, end: corner };
+      return { start: start, end: { x: best % size, y: (best - (best % size)) / size } };
     }
 
-    // 兜底：终点必须是 [1, size-2] 内的通路格；
-    // 若默认角落不是通路，退化为"离起点最远的通路格"（仍在内部区域）
-    if (!isOpen(maze, end.x, end.y)) {
-      var alt = null, altD = -1;
-      for (var ay = 1; ay < size - 1; ay += 2) {
-        for (var ax = 1; ax < size - 1; ax += 2) {
-          if (maze.grid[ay * size + ax] !== 0) continue;
-          var ad = Math.abs(ax - start.x) + Math.abs(ay - start.y);
-          if (ad > altD) { altD = ad; alt = { x: ax, y: ay }; }
-        }
-      }
-      if (alt) end = alt;
+    var rng = mulberry32(hashString(String(maze.seed == null ? '' : maze.seed) + '#end'));
+    var half = size / 2;
+    var quads = [[], [], [], []];
+    for (i = 0; i < pool.length; i++) {
+      var qi = (pool[i].x < half ? 0 : 1) + (pool[i].y < half ? 0 : 2);
+      quads[qi].push(pool[i]);
     }
-    return { start: start, end: end };
+    // 在**非空**象限里等概率挑一个，再在象限内均匀取一格。
+    // 写成"洗牌后取第一个非空"会偏向候选格更多的象限（东南），等概率挑才是真正的分层。
+    var nonEmpty = [];
+    for (i = 0; i < quads.length; i++) if (quads[i].length > 0) nonEmpty.push(i);
+    var end = null;
+    if (nonEmpty.length > 0) {
+      var bucket = quads[nonEmpty[Math.floor(rng() * nonEmpty.length)]];
+      end = bucket[Math.floor(rng() * bucket.length)];
+    }
+    if (!end) end = pool[Math.floor(rng() * pool.length)];
+    return { start: start, end: { x: end.x, y: end.y } };
   }
 
   /** 检查通路（不越界且非墙） */
@@ -1113,6 +1200,7 @@ if (farCell) {
     THEMES: THEMES,
     generate: generate,
     carveLoops: carveLoops,
+    LAYOUT_VERSION: LAYOUT_VERSION,
     pickEndpoints: pickEndpoints,
     isOpen: isOpen,
     cellToWorld: cellToWorld,

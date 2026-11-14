@@ -957,7 +957,9 @@
     copy.cells = SANDBOX_CELLS;   // 15×15 网格
     copy.coins = 0;               // 不放金币（需要时用道具面板生成）
     copy.ceiling = false;         // 没有天花板
-    copy.farCell = false;
+    /* BUG-067：终点门槛在新规则里叫 endFarRatio；沙盒稍后由 prepareMaze() 直接接管 start/end，
+       这里置 0 只是兜底：万一接管没跑到，也不至于让沙盒去挑一个很远的终点。 */
+    copy.endFarRatio = 0;
     copy.wallHeight = 3;          // 无墙，仅用于内部参数占位
     copy.name = '沙盒';            // HUD / 胜利结算都读难度名，沿用原难度名会显示成"困难"（BUG-025）
     // 空地一览无余，雾按"能看清整个场地"给（沿用困难档 0.0252 会糊成一片）

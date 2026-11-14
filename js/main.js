@@ -710,7 +710,7 @@
     MG.Maze.carveLoops(maze, loopRatio);
 
     // 2) 起点终点
-    var ep = MG.Maze.pickEndpoints(maze, diff.farCell);
+    var ep = MG.Maze.pickEndpoints(maze, diff.endFarRatio);
     maze.start = ep.start;
     maze.end = ep.end;
 

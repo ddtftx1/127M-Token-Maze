@@ -16,6 +16,16 @@
   /** localStorage key 前缀 */
   var PREFIX = 'maze3d.replay.v1.';
   /**
+   * 当前关卡布局版本（BUG-067，2026-11-14）。
+   * 取 MG.Maze.LAYOUT_VERSION —— 终点位置规则一变，同 seed 的关卡布局就变了，
+   * 旧回放/幽灵如果还按老路径重放，会出现"幽灵跑向一个已经不存在的终点"。
+   * 所以存盘时记下当时的布局版本，读取时版本不符即视为无效并顺手删除（用户口径：
+   * 旧回放自动失效）。maze.js 在本模块之前加载，正常一定取得到；取不到时退回 1。
+   */
+  function layoutVersion() {
+    return (MG.Maze && MG.Maze.LAYOUT_VERSION) ? MG.Maze.LAYOUT_VERSION : 1;
+  }
+  /**
    * 全局最多保留的回放条数（防止 localStorage 膨胀）
    * 8 局 × 最长 9000 帧 × 约 30 字节 ≈ 2 MB，安全落在 5 MB 配额内
    */
@@ -124,6 +134,9 @@
     meta = meta || {};
     var payload = {
       v: 1,
+      /* BUG-067：记录生成这一局时用的关卡布局版本。读取时会比对，
+         不符的旧记录直接作废并删除（同 seed 的关卡布局已经变了）。 */
+      layout: layoutVersion(),
       diff: String(diffKey),
       seed: String(seed == null ? '' : seed),
       date: new Date().toISOString().slice(0, 10),
@@ -184,30 +197,39 @@
     return true;
   }
 
-  /** 读取一局回放的帧序列（不存在或已损坏返回 null） */
-  function load(diffKey, seed) {
+  /**
+   * 读取一局回放的原始 JSON 并做两层校验：
+   * ① 关卡布局版本必须与当前一致（BUG-067）——不符说明这个 seed 的关卡已经变了，
+   *    记录直接作废，并**顺手删除**（用户口径：旧回放自动失效），免得白占配额；
+   * ② 帧序列形状必须合法（见 validFrames 的说明）。
+   * @returns {Object|null} 解析后的 payload，无效时 null
+   */
+  function readValid(diffKey, seed) {
     var raw = safeGet(makeKey(diffKey, seed));
     if (!raw) return null;
     try {
       var data = JSON.parse(raw);
       if (!data || !validFrames(data.frames)) return null;
-      return data.frames;
+      if (data.layout !== layoutVersion()) {
+        // 旧布局的回放：删除并当作不存在（幽灵/回放都会得到 null 走各自的无数据分支）
+        try { global.localStorage.removeItem(makeKey(diffKey, seed)); } catch (e) { /* 忽略 */ }
+        return null;
+      }
+      return data;
     } catch (e) {
       return null;
     }
   }
 
+  /** 读取一局回放的帧序列（不存在、布局版本不符或已损坏返回 null） */
+  function load(diffKey, seed) {
+    var data = readValid(diffKey, seed);
+    return data ? data.frames : null;
+  }
+
   /** 读取完整回放数据（含 meta） */
   function loadFull(diffKey, seed) {
-    var raw = safeGet(makeKey(diffKey, seed));
-    if (!raw) return null;
-    try {
-      var data = JSON.parse(raw);
-      if (!data || !validFrames(data.frames)) return null;
-      return data;
-    } catch (e) {
-      return null;
-    }
+    return readValid(diffKey, seed);
   }
 
   /**
@@ -228,16 +250,24 @@
       var items = [];
       for (i = 0; i < keys.length; i++) {
         var savedAt = 0;
+        var stale = false;
         try {
           var d = JSON.parse(global.localStorage.getItem(keys[i]) || '{}');
           savedAt = d.savedAt || 0;
+          // BUG-067：布局版本不符的旧记录一律清掉，别让它们占着配额
+          if (d.layout !== layoutVersion()) stale = true;
         } catch (e) { /* 损坏数据视为最旧 */ }
+        if (stale) {
+          try { global.localStorage.removeItem(keys[i]); } catch (e2) { /* 忽略 */ }
+          continue;
+        }
         items.push({ key: keys[i], savedAt: savedAt });
       }
+      if (items.length <= limit) return;
       items.sort(function (a, b) { return a.savedAt - b.savedAt; });
       var removeCount = items.length - limit;
       for (i = 0; i < removeCount; i++) {
-        try { global.localStorage.removeItem(items[i].key); } catch (e) { /* 忽略 */ }
+        try { global.localStorage.removeItem(items[i].key); } catch (e3) { /* 忽略 */ }
       }
     } catch (e) { /* 忽略 */ }
   }

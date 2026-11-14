@@ -130,11 +130,11 @@ CSS 只调整合成方式与滚动链，未改任何主题变量与配色定义�
 - **BUG-064 端到端（`harness/bug064-repro.js`，24 个用例，真实 DOM click/keydown）**：
   修复前 **PASS 64 / FAIL 12**（四条"暂停局来源"路径全部落到主菜单，`state` 仍 `paused`、关卡未释放）
   → 修复后 **PASS 264 / FAIL 0**（退出码 0）。回归本版仍为 **264 / 0**。
-- **BUG-065 端到端（`harness/bug065-repro.js`）**：
-  修复前落到 `#main-menu` 且 `state` 仍 `win` → 修复后六条返回路径全部回到 `#win-screen`
-  且 `state` 保持 `win`；「快速跳转 → 主菜单」仍 `state === 'menu'`、`mazeView === null`；
-  返回胜利界面后最佳记录与排行榜条目数不增长（不重复结算）。明细见
-  `BUG/BUG(2026.11.14).md` 的「验证汇总」。
+- **BUG-065 端到端（`harness/bug065-repro.js`，9 组 45 条，真实通关路径 + 真实 DOM click）**：
+  修复前 **PASS 39 / FAIL 6**（退出码 1；六条 win 态返回路径全部落 `#main-menu` 且 `state` 仍 `win`）
+  → 修复后 **PASS 45 / FAIL 0**（退出码 0）；「快速跳转 → 主菜单」仍 `state === 'menu'`、
+  `mazeView === null`；返回胜利界面后最佳记录与排行榜条目数不增长（不重复结算）。
+  明细见 `BUG/BUG(2026.11.14).md` 的「验证汇总」。
 - **BUG-066 渲染计数（`harness/bug066-render.js`，8 组 41 条）**：
   修复前 **PASS 36 / FAIL 5**（退出码 1）→ 修复后 **PASS 41 / FAIL 0**（退出码 0）。
 - **BUG 归档格式自查**（`BUG/BUG.md` 里的命令）：**10 个归档文件全部 `断链：无 … ✓`**。

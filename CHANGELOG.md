@@ -86,6 +86,57 @@
 
 ---
 
+## 性能优化（2026-11-14 · BUG-066）
+
+> 根因分析、复现、修复细节与渲染计数对照见 `BUG/BUG(2026.11.14).md`。
+
+**用户反馈**：「部分设备进游戏是不卡的，但是主界面和各种 UI 会卡、滑动会卡顿，
+游戏内容探索迷宫就不会怎么卡」——注意这个"反过来卡"的分布本身就是线索：
+3D 满载的场景流畅，几乎没内容的 DOM 面板反而卡。
+
+- **① 看不见的 3D 画面仍在逐帧渲染（主因）**：`loopBody()` 结尾无条件
+  `renderer.render()`，连主菜单 / 商店 / 排行榜 / 成就 / 签到 这些**全屏铺满**、
+  玩家根本看不见 3D 画面的界面也照画不误；`paused` / `win` 也一样 —— 而这两种状态下
+  主循环**根本不推进任何 3D 动画**，每帧重画的都是同一张静止画面。
+  已改为**脏标记按需渲染**：`menu` / `paused` / `win` / 开发者面板打开时不再空转，
+  只在"画面真的需要变"时画一帧（回菜单、窗口尺寸变化、设置变更、进入暂停、通关）。
+  `playing` / `replay` / `loading` 保持每帧渲染，行为一点没变。
+- **② 全屏毛玻璃挂在了滚动容器自己身上（卡顿的直接来源）**：`.screen` 既是全屏层、
+  **又是滚动容器**，同时挂着 `backdrop-filter: blur(2px)` —— 手指每移动一帧，
+  合成器都要按新的滚动偏移重算**整屏**模糊。已把毛玻璃挪到 `position:fixed` 的
+  `.screen::before` 独立层（锚在视口上、滚动时纹丝不动，可被缓存成纹理），
+  **2px 模糊强度原样保留**；补 `isolation: isolate` 固定层叠上下文。
+  游戏内那 6 个 `blur(6px)` 的 HUD 小芯片**一行未动**（它们本来就不卡）。
+- **③ 无限循环的 paint 动画 + 双层滚动抢手势（加剧）**：签到「今天」格子的呼吸动画
+  动的是 `box-shadow`（10↔20px 模糊），属 paint 动画、每帧重绘，且就在带全屏毛玻璃的层里；
+  已把光晕移到 `.sign-today::before`、动画只驱动 `opacity`（0.24↔0.55，2.4s，
+  节奏不变），`prefers-reduced-motion` 段同步补上。另外 11 处滚动容器加了
+  `overscroll-behavior: contain`，内层滚到边界不再把剩余手势传给外层
+  （那是"滑到头突然跳一截"的来源，玩家也常描述成"卡"）。
+- **新增真机自测入口**：开发者面板「环境」页加了「长帧 &gt;25ms」读数（10 秒滚动窗口）。
+  先退出面板滑一遍菜单，再回来读数字 —— 这是无头环境量不到、只能靠真机确认的那部分。
+  探针搭在常驻主循环上，不额外开定时器。
+- **唯一可见变化**：签到「今天」格子的外发光颜色由写死的科技蓝改为 `var(--accent)`
+  （科技主题像素级一致；地牢/森林主题下原本是"橙色边框配蓝色光晕"的错色）。
+  外发光半径固定 16px、只变强弱（原来 10↔20px 会胀缩）—— 因为 box-shadow 动画本身就是
+  要消掉的那个开销。不接受可改回写死蓝色（一行）。
+- **不改**：任何界面结构、功能逻辑、存档格式、玩法参数。
+
+**验证**（详见 `BUG/BUG(2026.11.14).md` 的「验证汇总」）：
+`node --check` 14/14；ES5 扫描 0 命中；无头冒烟 **9/9 PASS**；
+渲染计数断言（仓库外 `harness/bug066-render.js`，8 组 41 条）修复前 **PASS 36 / FAIL 5**
+→ 修复后 **PASS 41 / FAIL 0**；BUG-064 的 264 条断言 **无回退**。
+关键计数：菜单 60 帧 **60 → 0**、`paused` 静止期 20 帧 **20 → 0**、`win` 静止期 **20 → 0**、
+开发者面板打开期间 **20 → 0**，而 `playing` **30 → 30**、`replay` **30 → 30**、
+回菜单 **1 次**（且渲染时 `mazeView === null`，画的是纯背景不是旧迷宫）、
+resize / 切主题各 **1**、切画质 **2**（重建渲染器自带首帧）。
+
+> 边界如实声明：jsdom **没有真实合成器 / 布局引擎 / GPU**，上述只能证明
+> "我们不再要求 GPU 画一张没人看的图"这一可观测事实，**不能证明**真机滑动帧率已提升，
+> 也不能证明浏览器端 `backdrop-filter` 不再重算 —— CSS 三项收益只能由真机滑动确认。
+
+---
+
 ## 新增
 
 - 设置面板 →「移动与画面」新增 **「小地图大小」**：`自动（按屏幕比例） / 小 / 中 / 大`，
@@ -177,13 +228,15 @@
 | `index.html` | BUG-062：设置面板新增「小地图大小」下拉 + 徽标 + 说明行 |
 | `js/settings.js` | BUG-062：默认值 `minimapSize: 'auto'` + 枚举校验 |
 | `js/ui.js` | BUG-062：`applyMinimapSizeToBody()` / `updateMinimapSizeBadge()` / `refreshMinimapSize()`（唯一入口）；`init`、`syncSettingsUI`、`resizeMinimap()` 三处接线；**BUG-064：新增 `isPausedGame()` / `backFromOverlay()` 并导出 `MG.UI.backFromOverlay`，排行榜 / 成就 / 商店三条返回改走它** |
-| `js/main.js` | BUG-062：`onSettingChanged` 增加 `minimapSize` 分支（改档立刻重测容器并重设画布分辨率）；**BUG-064：`Game.input.onPause`（ESC / P 链）在设置分支后新增 `isOverlayOpen()` → `backFromOverlay()` 分支** |
-| `js/dev.js` | BUG-061：`playAudioRaw()` 按**调用前**的上下文状态如实反馈；`renderAudio()` 增加真实 `AudioContext` 状态 / 实际增益 / 解锁指引；新增 `audioDiag()`（走静音前备份）；`portal` 试听按钮补说明标签；**BUG-064：`doGoto('menu')` 在存在活关卡时改走 `MG.UI.pauseCallbacks.onMenu()`（释放关卡、`state` 归 `menu`）** |
+| `js/main.js` | BUG-062：`onSettingChanged` 增加 `minimapSize` 分支（改档立刻重测容器并重设画布分辨率）；**BUG-064：`Game.input.onPause`（ESC / P 链）在设置分支后新增 `isOverlayOpen()` → `backFromOverlay()` 分支**；**BUG-066：新增 `isSceneCovered()` / `renderScene()` / `markSceneDirty()` / `noteFrameGap()`；`loopBody()` 结尾改为脏标记按需渲染；`backToMenu` / `onResize` / `onSettingChanged` / `pauseGame` / `onVictory` 五处置脏** |
+| `js/dev.js` | BUG-061：`playAudioRaw()` 按**调用前**的上下文状态如实反馈；`renderAudio()` 增加真实 `AudioContext` 状态 / 实际增益 / 解锁指引；新增 `audioDiag()`（走静音前备份）；`portal` 试听按钮补说明标签；**BUG-064：`doGoto('menu')` 在存在活关卡时改走 `MG.UI.pauseCallbacks.onMenu()`（释放关卡、`state` 归 `menu`）**；**BUG-066：环境页新增长帧读数（`longFrameText()` + `#dev-longframes`），环境报告同步** |
+| `css/style.css` | BUG-062：新增 `--minimap-size`（自适应公式 + 三档覆盖 + 老内核 px 兜底）、`.minimap-wrap` 改用变量、横屏档改覆盖 `:root`、新增 `.setting-hint`；**BUG-066：`.screen` 毛玻璃移出滚动容器（`.screen::before` + `isolation:isolate`）、`signBreathe` 改 opacity 合成动画（`.sign-today::before`）、11 处滚动容器加 `overscroll-behavior:contain`** |
 | `js/checkin.js` | BUG-064：`closePanel()` 改为优先调 `MG.UI.backFromOverlay()`（取不到时按 `showMainMenu` / `hide` 逐级兜底） |
 | `BUG/*.md`（7 个归档） | BUG-063：补齐 `## 目录`、统一 `<h2 id="bug-0xx">` 显式锚点、非条目章节补 id、修掉 10.25 的 16 条失效链接（正文未改） |
 | `BUG/BUG(2026.11.09).md` | 新增：BUG-061 + BUG-062 + BUG-063 归档（含频谱证据表、尺寸公式表与端到端验证） |
 | `BUG/BUG(2026.11.13).md` | 新增：BUG-064 归档（含修复前 FAIL / 修复后 PASS 的 jsdom 端到端对照与覆盖边界声明） |
-| `BUG/BUG.md` | BUG-063：新增「归档文件模板（必须带目录）」+ 3 条硬性要求 + 自查命令；**BUG-064：归档索引新增 `BUG(2026.11.13).md` 一行，编号推进到 BUG-065** |
+| `BUG/BUG(2026.11.14).md` | 新增：BUG-066 归档（含渲染调用计数对照表与覆盖边界声明） |
+| `BUG/BUG.md` | BUG-063：新增「归档文件模板（必须带目录）」+ 3 条硬性要求 + 自查命令；BUG-064 / BUG-066：归档索引逐条新增，编号推进到 **BUG-067** |
 | `_模板.md` | BUG-063：CHANGELOG 模板里补一句"BUG 归档必须带目录与显式锚点"的指向说明 |
 | `CHANGELOG.md` | 本文件：2026-11-09 版本日志 |
 | `CHANGELOG/2026.11.08/` | 新增：上一版日志归档（`2026.11.08.md` + `README.md`） |

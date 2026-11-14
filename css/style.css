@@ -160,19 +160,97 @@ html, body {
   bottom: 0;
   left: 0;
   z-index: 40;
+  /* isolation:isolate 把 .screen 钉死成一个层叠上下文（它本来就靠 z-index:40 算一个，
+     但那是"顺带"成立的）：下面 .screen::before 用 z-index:-1 沉到"本上下文背景之上、
+     内容之下"，前提必须是有这个上下文。万一以后有人挪走 z-index:40，负 z-index 的
+     伪元素会直接掉到 #app 的 3D 画布后面 → 毛玻璃静默消失，排查起来极其隐蔽。 */
+  isolation: isolate;
   display: flex;
   align-items: center;
   justify-content: center;
   padding: calc(12px + var(--safe-t)) calc(12px + var(--safe-r))
            calc(12px + var(--safe-b)) calc(12px + var(--safe-l));
+  /* 观感主体：这层径向渐变**保持不动**（毛玻璃只是叠在它背后的一层模糊，
+     改造前后渐变本身一点没变；第 2 档老内核模拟 body.sim-legacy-2 .screen 也照旧覆盖它） */
   background: radial-gradient(circle at 50% 20%, rgba(20, 40, 70, 0.55), rgba(3, 6, 12, 0.94));
-  -webkit-backdrop-filter: blur(2px);
-  backdrop-filter: blur(2px);
+  /* 毛玻璃**不再挂在 .screen 自己身上**（2026-11-14）：见下方 .screen::before 的完整说明。
+     这里刻意连 -webkit-backdrop-filter 一起删干净 —— 只删无前缀那条的话，Chrome 认前缀，
+     等于白改。 */
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
   touch-action: pan-y;
+  /* 滚动链隔离，见下方「滚动链隔离」段的说明 */
+  overscroll-behavior: contain;
 }
 
+/* ---------- .screen 的毛玻璃：从"滚动容器自己"挪到"固定不动的独立图层" ----------
+   （2026-11-14 修「主界面/面板滑动卡顿」，游戏内探索一直流畅 → 锅在 UI 层）
+
+   ── 根因：为什么不能把 backdrop-filter 挂在滚动容器上 ──
+   .screen 本身就是全站最外层的滚动容器（overflow-y:auto + -webkit-overflow-scrolling:touch）。
+   backdrop-filter 挂在它身上时，被模糊的是"它身后的一切"（3D 画布 + HUD + 自身背景），
+   而这层**全屏模糊结果依附在一个正在滚动的图层上**：手指每移动一帧，合成器都要按新的
+   滚动偏移重新裁切/重算这块"整屏被模糊过的底图"，再把滚动内容叠上去。
+   一次全屏模糊 ≈ 一次全屏后处理，手机 GPU 的填充率本来就被 3D 画布吃掉大半，
+   于是"画布不动时流畅、一滑面板就卡"。
+   换成 position:fixed 的伪元素后：这一层锚在视口上、跟着视口一动不动，它身后的底图
+   （画布 / 背景渐变）在滑动期间**没有任何变化**，浏览器可以把模糊结果缓存成一张纹理，
+   滚动期间只做混合；滚动的是它上面的内容，不再触发模糊重算。2px 的模糊强度原样保留。
+
+   ── 必须核对项 1：position:fixed 在 .screen 里成立吗（已 grep 全链路确认）──
+   祖先链只有 body > #app > .screen：
+     html/body 是 position:fixed（防地址栏抖动），#app 是 position:absolute + inset:0 +
+     overflow:hidden，两者**都没有** transform / filter / perspective / will-change /
+     contain:paint / backdrop-filter；.screen 自身也没有 —— 没有任何一层给 fixed 造包含块，
+     所以 fixed 相对视口；而 #app 与视口等大，因此"视口"与".screen 的盒子"完全重合，位置零差异。
+   另外 .screen 的父级 overflow:hidden 也不会裁掉它：祖先 overflow 只裁"包含块落在自己内部"
+   的后代，fixed 的包含块是视口，不在 #app 的裁剪链里。
+   （唯一的历史坑：iOS 13 之前 .screen 上的 -webkit-overflow-scrolling:touch 会把 fixed
+     后代按滚动内容定位。该属性自 iOS 13 起已是 no-op/被忽略，现役设备不会命中；
+     若以后真要回滚到 iOS 12 那种内核，就改用"直接去掉 blur"的兜底方案 —— 别加 transform。）
+   ⚠ 反向提醒：以后谁给 #app / .screen 加 transform / filter / will-change / contain:paint，
+     这一层会立刻错位（变成跟着面板滚），必须回头改成绝对定位铺满 .screen —— 别无声无息地加。
+
+   ── 必须核对项 2：z-index:-1 的落点 ──
+   .screen 是层叠上下文，负 z-index 的后代只沉到"本上下文背景之上、内容之下"：
+   即压在 radial-gradient 背景之上、.panel 文字之下，盖不住任何可交互内容；
+   再配 pointer-events:none，滚动手势 100% 落到下面的面板上，不抢触摸。
+   （背景渐变会一起进入这一层的 backdrop 被 2px 糊掉 —— 它是平滑渐变，
+     2px 模糊在视觉上等于没变化，见交付说明。）
+
+   ── 必须核对项 3：老内核模拟 body.sim-legacy-1 会不会漏掉它 ──
+   不会，而且不用在这里另写复位：文件末尾「老内核模拟（BUG-032）· 第 1 档」那组通配复位
+   选的是 `body.sim-legacy-1 *::before`，其中 backdrop-filter:none !important 已经把本伪元素
+   一起关掉了（选伪元素方案的额外好处：复位规则天然命中，不像新增 class 那样需要补一条）。
+   也就是说"第 1 档真降级预览"依旧是真·无模糊，与改造前完全一致。 */
+.screen::before {
+  content: '';
+  /* fixed 让这一层脱离 .screen 的滚动（fixed 后代不是 flex item，
+     也不会挤动 .screen 的 align-items:center 布局），滑动时纹丝不动 */
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  -webkit-backdrop-filter: blur(2px);
+  backdrop-filter: blur(2px);
+  pointer-events: none;   /* 纯装饰层，绝不吃触摸/滚动手势 */
+  z-index: -1;            /* 沉到 .screen 背景之上、.panel 内容之下（见上方说明） */
+}
+
+/* ---------- 滚动链隔离（2026-11-14 修「触屏滑动粘手/跳一下」）----------
+   面板里其实是**双层滚动**：外层 .screen（overflow-y:auto）套内层
+   （.panel / .settings-scroll / .ranking-list / .achievements-page-list / .shop-list /
+   .dev-body / .dev-pre / .dev-log-list / .dev-tabs）。
+   默认 overscroll-behavior:auto 时，内层滚到边界会**把剩余手势传给外层继续滚** ——
+   触屏上的体感就是"滑到头突然往下跳一截 / 手指还按着但画面不动了"。
+   玩家反馈的"滑动卡顿"里有一半不是掉帧，而是这种两层滚动抢手势（观感一样糟）。
+   contain = 内层到边界就到此为止，不再把滚动传给祖先，手势始终只驱动当前这一层。
+
+   兼容性：overscroll-behavior 是 Chrome 63+ / Safari 16+ 的成熟属性，Chrome 109 基线内。
+   老内核不认识它 → 按"无效声明"直接丢弃，行为退回改造前，**不会更差**，
+   所以不需要 body.sim-legacy-* 的额外复位（那条通配复位也没法表达它）。
+   注意与 -webkit-overflow-scrolling:touch（iOS 的老动量滚动开关）无关，后者保持不动。 */
 .panel {
   width: 100%;
   max-width: 620px;
@@ -185,6 +263,7 @@ html, body {
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
   touch-action: pan-y;
+  overscroll-behavior: contain;          /* 滚动链隔离 */
 }
 
 .panel-narrow { max-width: 440px; }
@@ -661,6 +740,7 @@ html, body {
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
   touch-action: pan-y;
+  overscroll-behavior: contain;          /* 滚动链隔离（说明见 .panel 上方） */
   padding-right: 4px;
 }
 
@@ -887,6 +967,7 @@ html, body {
   max-height: 44vh;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;          /* 滚动链隔离（说明见 .panel 上方） */
 }
 
 /* 成就独立页面列表（原主菜单折叠面板已移除） */
@@ -894,6 +975,7 @@ html, body {
   max-height: 56vh;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;          /* 滚动链隔离（说明见 .panel 上方） */
 }
 .ranking-list li {
   justify-content: flex-start;
@@ -995,6 +1077,7 @@ html, body {
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
   touch-action: pan-y;
+  overscroll-behavior: contain;          /* 滚动链隔离（说明见 .panel 上方） */
   padding-right: 2px;
 }
 
@@ -1468,13 +1551,54 @@ body[data-colorblind="1"] .item-count {
 .sign-future { opacity: 0.32; }
 .sign-today {
   border-color: var(--accent);
-  box-shadow: 0 0 0 1px var(--accent) inset, 0 0 16px rgba(53, 208, 255, 0.3);
-  animation: signBreathe 2.4s ease-in-out infinite;
+  /* 静态底环：只留 1px 内环，**不参与动画**（外发光的强弱全交给下面那层伪元素）。
+     这样即使动画被关掉（老内核模拟 / prefers-reduced-motion），今日格子依然有一圈
+     清晰的强调环，不会退化成"和普通格子一样"。 */
+  box-shadow: 0 0 0 1px var(--accent) inset;
+  /* 这里故意不重复写 position:relative —— 定位基准来自 .sign-cell 的 position:relative，
+     光晕伪元素是绝对定位、依赖它。谁要是把 .sign-cell 的 relative 删了，
+     光晕会跑到整个面板的左上角，记得连这里一起看。 */
 }
 .sign-today .sign-cell-text { color: var(--accent); font-weight: 700; }
+/* ---------- 「今日」呼吸光晕：从 box-shadow 动画改成 opacity 动画（2026-11-14）----------
+   ── 根因：box-shadow 是绘制属性，不能交给合成器 ──
+   原写法把 20px 模糊的 box-shadow 直接放进 @keyframes → 每一帧都要重新光栅化那张
+   带模糊的阴影（paint），并连带这块面板的绘制失效；而这个动画是 infinite 的，
+   等于**只要签到面板开着，UI 就在以 60fps 持续重绘**。它又正好长在上面那个
+   全屏毛玻璃 .screen 里（毛玻璃 + 每帧重绘 = 双重打击），所以签到页是全站最卡的一页。
+   现在：阴影只在布局稳定后**画一次**，动的东西只有 opacity（合成器属性），
+   动画期间不触发 layout / paint，只做图层混合。
+   呼吸节奏保持 2.4s / ease-in-out / 内外两档：最低档 = .sign-today 的 1px 实环
+   + 本层 0.24；最高档 = 本层 2px 内环 + 更亮的外发光（0.55）。
+   ── 观感差异（务必知道）──
+   ① 外发光的"半径"不再随呼吸变大变小（原来 10px↔20px），改成固定 16px 只变强弱；
+      肉眼看到的是"亮度在呼吸"，而不是"光晕在胀缩"，幅度很小、更稳。
+   ② 光晕改由叠加图层绘制，与相邻格子的叠压顺序和原版略有不同
+      （格子底色只有 3% 白，肉眼基本看不出）。
+   ── 颜色 ──
+   全部走 var(--accent)。原版外发光把科技蓝 rgba(53,208,255,…) 写死了，
+   地牢/森林主题下是"橙边配蓝光"的错色；现在三套主题各自发光，且没有新增硬编码颜色。
+   ── 老内核 / 减少动效 ──
+   body.sim-legacy-1 的通配复位 `*::before` 会把 box-shadow:none 与 animation:none
+   一起打进本层（第 1 档下无光晕、无动画，与改造前一致）；
+   prefers-reduced-motion 那段也补了 .sign-today::before（否则动画挪了位置就关不掉）。 */
+.sign-today::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  border-radius: inherit;            /* 跟格子同圆角（12px），直角档里会被通配复位成 0 */
+  /* 内圈 2px = 原 keyframes 的 50% 档；外发光固定 16px，强弱全靠下面的 opacity */
+  box-shadow: 0 0 0 2px var(--accent) inset, 0 0 16px var(--accent);
+  opacity: 0.24;
+  animation: signBreathe 2.4s ease-in-out infinite;
+  pointer-events: none;              /* 纯装饰，别挡按钮/滚动 */
+}
 @keyframes signBreathe {
-  0%, 100% { box-shadow: 0 0 0 1px var(--accent) inset, 0 0 10px rgba(53, 208, 255, 0.22); }
-  50% { box-shadow: 0 0 0 2px var(--accent) inset, 0 0 20px rgba(53, 208, 255, 0.42); }
+  0%, 100% { opacity: 0.24; }
+  50% { opacity: 0.55; }
 }
 .sign-cell-corner {
   position: absolute;
@@ -1542,9 +1666,12 @@ body[data-colorblind="1"] .item-count {
   .sign-countdown { margin-top: 5px; }
 }
 
-/* ---------- 减少动效偏好 ---------- */
+/* ---------- 减少动效偏好 ----------
+   注意 .sign-today::before：呼吸动画 2026-11-14 已经从 .sign-today 挪到它的伪元素上，
+   这里必须跟着补一条，否则"减少动效"开关对签到格子会静默失效。
+   .sign-today 保留在列表里也无害（它自己现在没有动画了，留着是给以后可能加的动效兜底）。 */
 @media (prefers-reduced-motion: reduce) {
-  .sign-dot, .sign-today { animation: none; }
+  .sign-dot, .sign-today, .sign-today::before { animation: none; }
 }
 
 /* ============================================================
@@ -1580,6 +1707,7 @@ body[data-colorblind="1"] .item-count {
   overflow-x: auto;
   overflow-y: hidden;
   -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;          /* 滚动链隔离（说明见 .panel 上方） */
   min-width: 0;
   min-height: 0;
   margin: 0 -4px 8px;
@@ -1614,6 +1742,7 @@ body[data-colorblind="1"] .item-count {
   overflow-y: auto;
   overflow-x: hidden;
   -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;          /* 滚动链隔离（说明见 .panel 上方） */
   padding-right: 2px;
 }
 
@@ -1760,6 +1889,7 @@ body[data-colorblind="1"] .item-count {
   padding: 8px;
   max-height: 200px;
   overflow: auto;
+  overscroll-behavior: contain;          /* 滚动链隔离（说明见 .panel 上方） */
   border-radius: 8px;
   background: rgba(0, 0, 0, 0.45);
   color: var(--text-dim);
@@ -1821,7 +1951,7 @@ body[data-colorblind="1"] .item-count {
 .dev-em3 { font-size: 3em; display: inline-flex; align-items: center; color: var(--text-dim); }
 
 /* ---------- 日志页 ---------- */
-.dev-log-list { max-height: 46vh; overflow-y: auto; margin-bottom: 6px; }
+.dev-log-list { max-height: 46vh; overflow-y: auto; overscroll-behavior: contain; margin-bottom: 6px; }
 .dev-log-item {
   display: flex;
   align-items: flex-start;

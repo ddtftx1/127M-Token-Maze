@@ -57,7 +57,14 @@
     _achieveToastTimer: null, // 通关后延迟弹出成就提示的定时器（离开本局时清理）
     _pendingAchieveToast: null, // 待播报的成就名（定时器被取消时由 backToMenu / buildLevel 补发）
     _renderStopped: false, // 渲染致命错误后停止循环
-    _ctxLost: false       // WebGL 上下文是否已丢失（恢复流程见 bindContextLoss / handleContextLost）
+    _ctxLost: false,      // WebGL 上下文是否已丢失（恢复流程见 bindContextLoss / handleContextLost）
+    /* BUG-066（2026-11-14）：菜单态"脏标记按需渲染"的开关。
+       初值 true —— 开机后第一帧必须真的画一次，否则画布是黑的（此时还没人置过脏标记）。
+       之后只有"画面真的需要变"的地方才会置 true，见 markSceneDirty() 的调用点。 */
+    _sceneDirty: true,
+    /* 长帧探针（只读诊断，见 loop() 里 PERF_WINDOW_MS 那段）。
+       给玩家一个"真机上到底卡不卡"的可观测数字：滑完菜单开开发者面板「环境」页就能看到。 */
+    perf: { frames: 0, longFrames: 0, lastFrames: 0, lastLongFrames: 0, windowStart: 0 }
   };
 
   /** 暴露给 player.js 使用（路径可视化需要 scene） */
@@ -541,6 +548,9 @@
     // 限制像素比
     applyPixelRatio();
     Game.renderer.setSize(w, h, false);
+    /* BUG-066：setSize 会把画布内容重设（不同实现下可能被清空），而菜单态默认不再逐帧渲染，
+       所以这里必须显式要求一次重画，否则"在菜单里转屏/拉窗口"会留下黑画布或拉伸的旧画面。 */
+    markSceneDirty();
   }
 
   function applyPixelRatio() {
@@ -1191,6 +1201,9 @@
     if (Game.itemPanelOpen) return;
     Game.state = 'paused';
     if (Game.input) Game.input.exitPointerLock();
+    /* BUG-066：暂停后画面就静止了，主循环不再逐帧渲染；这里补一次脏标记，
+       保证画布上留下的是"按下暂停那一刻"的准确画面，而不是上上帧。 */
+    markSceneDirty();
     if (openSettings) {
       // HUD 设置按钮一步到位：直接进入设置界面（关闭时按 hud 来源恢复游戏）
       MG.UI.showSettings('hud');
@@ -1263,6 +1276,10 @@
     MG.UI.showMainMenu();
     MG.UI.refreshRecords();
     MG.UI.refreshAchievements();
+    /* BUG-066：上面把关卡整个 dispose 掉、又把场景背景色换成了当前主题的 sky，
+       画布上现在还是上一秒那张迷宫画面 —— 必须补一次渲染把它刷成纯背景色，
+       否则玩家会看到"回主菜单了，底下还留着刚才那局的迷宫"。 */
+    markSceneDirty();
     // 签到入口的角标/文案（跨天或刚领取后回到菜单时保持一致）
     if (MG.Checkin && typeof MG.Checkin.refreshBadge === 'function') MG.Checkin.refreshBadge();
     // 沙盒测试局结束：复位标记，避免下一次正常开局还按沙盒处理
@@ -1275,6 +1292,9 @@
   function onVictory() {
     if (Game.state === 'win') return;
     Game.state = 'win';
+    /* BUG-066：通关后画面静止（win 态不推进 3D 动画），主循环不再逐帧渲染；
+       补一次脏标记，让胜利界面背后那张画面停在"刚抵达终点"的准确一帧。 */
+    markSceneDirty();
 
     var diff = Game.diff;
     var player = Game.player;
@@ -1527,6 +1547,98 @@
    * ---------------------------------------------------------- */
   var lastMapDraw = 0;
 
+  /* ------------------------------------------------------------
+   * 菜单态"脏标记按需渲染"（BUG-066，2026-11-14）
+   * ------------------------------------------------------------
+   * 背景：用户反馈"进游戏探索迷宫不卡，但主界面和各种 UI 面板滑动卡顿"。
+   * 根因（不是设备性能不够，是我们在白烧）：
+   *   ① 主菜单 / 商店 / 排行榜 / 成就 / 签到 全是 .screen 全屏层，把它们下面的 3D 画布
+   *      完全盖住（只透出一层 0.55~0.94 alpha 的渐变底色），可 loopBody() 结尾仍然
+   *      **每帧无条件 renderer.render()** —— 玩家看不见的东西，60 次/秒画一遍；
+   *   ② 画布每帧都在变，于是画布上那层全屏 backdrop-filter（毛玻璃）也跟着每帧失效、
+   *      每帧重算整屏模糊；玩家一滑动，滚动帧和这个重算撞在一起 → 就是"滑动卡顿"。
+   *      而游戏内毛玻璃只挂在 .stat / .icon-btn 这类几十像素的小芯片上，代价可以忽略，
+   *      所以**只有菜单卡、游戏内不卡**。
+   *
+   * 做法：把"要不要渲染"从"每帧都画"改成"画面真的需要变才画"。
+   * 跳过的状态见 isSceneCovered()：menu / paused / win（这三种状态下 loopBody 不推进任何
+   * 3D 动画，画面是静止的，前面又必然盖着一张全屏 .screen），外加开发者面板打开时。
+   * playing / replay / loading **保持每帧渲染**，一点没动。
+   *
+   * 代价与风险：任何"在覆盖状态下改变了 3D 画面"的代码路径都必须置脏，否则画面会停在旧的。
+   * 目前这类路径有五条（回菜单 / 窗口尺寸 / 设置变更 / 进入暂停 / 通关），
+   * 见 markSceneDirty() 的各调用点；新增同类路径时**务必**跟着补一次。
+   * ---------------------------------------------------------- */
+
+  /** 把"下一帧需要真的渲染一次"标脏（幂等，可以重复调） */
+  function markSceneDirty() {
+    Game._sceneDirty = true;
+  }
+
+  /**
+   * 画布当前是否被某个全屏 DOM 层完全盖住（盖住即可跳过渲染）。
+   * 判据只有两条，故意写死：
+   *  - Game.state 是 menu / paused / win：这三种状态下主循环**不推进任何 3D 动画**
+   *    （见 loopBody 的分支：playing 才 update、replay 才 updateReplay），
+   *    画面是静止的；而这三种状态的正前方必然盖着一张全屏 .screen
+   *    （主菜单 / 商店 / 排行榜 / 成就 / 签到 / 暂停菜单 / 设置 / 胜利界面）；
+   *  - 开发者面板打开：它是全屏调试层，打开前会强制暂停（js/dev.js 的 open()，BUG-036）。
+   * 为什么 paused 也算：暂停时画布上是"按下暂停那一刻"的画面，之后不会再变 ——
+   *    每帧重画同一张图，玩家一点也看不出来，却让画布上的全屏毛玻璃每帧重算一遍。
+   * 为什么**不**把 loading 算进来：加载期间正在建关卡，渲染与否不该节外生枝。
+   * 为什么**不**按"某个 screen 元素是否可见"判断：那要枚举十几个 id，漏一个就是黑屏级错误，
+   *    而状态机的取值是单一、可枚举的。
+   */
+  function isSceneCovered() {
+    var st = Game.state;
+    if (st === 'menu' || st === 'paused' || st === 'win') return true;
+    if (MG.Dev && MG.Dev.isOpen && MG.Dev.isOpen()) return true;
+    return false;
+  }
+
+  /** 渲染一帧（含异常兜底：渲染出错就停循环并给出可见错误界面，避免玩家一直黑屏无感知） */
+  function renderScene() {
+    try {
+      Game.renderer.render(Game.scene, Game.camera);
+    } catch (e) {
+      // 渲染异常：只提示一次，并停止渲染循环 + 给出可见错误界面
+      if (!Game._renderErrLogged) {
+        Game._renderErrLogged = true;
+        console.error('[game] 渲染异常', e);
+        Game._renderStopped = true;
+        fatal('渲染异常', '请尝试刷新页面或更换浏览器。');
+      }
+    }
+  }
+
+  /** 长帧探针的统计窗口（毫秒）：窗口滚动，取最近一个窗口的结果给开发者面板显示 */
+  var PERF_WINDOW_MS = 10000;
+  /** 单帧超过这个毫秒数算"长帧"（60fps 的预算是 16.7ms，25ms 已经能感知到顿一下） */
+  var PERF_LONG_FRAME_MS = 25;
+
+  /**
+   * 记录一帧的间隔，维护"最近一个窗口内的长帧数"。
+   * 搭在已有的 rAF 循环里，成本是每帧一次 Date.now() 加两个整数运算，可忽略。
+   * 用途：无头测试量不到真机帧率，这是唯一能让玩家自己复核"UI 到底还卡不卡"的手段
+   * （滑一遍菜单 → 开开发者面板「环境」页看数字）。
+   */
+  function noteFrameGap() {
+    var now = Date.now();
+    var p = Game.perf;
+    if (!p.windowStart) p.windowStart = now;
+    if (now - p.windowStart >= PERF_WINDOW_MS) {
+      // 上一个窗口结算：留一份给面板读取，然后开新窗口
+      p.lastFrames = p.frames;
+      p.lastLongFrames = p.longFrames;
+      p.frames = 0;
+      p.longFrames = 0;
+      p.windowStart = now;
+    }
+    p.frames++;
+    if (p._lastTs && now - p._lastTs > PERF_LONG_FRAME_MS) p.longFrames++;
+    p._lastTs = now;
+  }
+
   /**
    * 主循环外层：只负责 rAF 调度与异常兜底；逐帧逻辑在 loopBody()。
    * 原实现只有 renderer.render 在 try 里 —— playing 分支任何一处抛错都会每帧刷屏，
@@ -1535,6 +1647,7 @@
   function loop() {
     if (Game._renderStopped) return; // 渲染致命错误后停止循环（不再调度下一帧）
     requestAnimationFrame(loop);
+    noteFrameGap();
     try {
       loopBody();
     } catch (e) {
@@ -1687,18 +1800,15 @@
       updateReplay(dt);
     }
 
-    // 渲染
+    /* 渲染（BUG-066：菜单态改为"脏标记按需渲染"，根因与风险见本文件 renderScene 上方那段）
+       —— 被全屏层盖住且没人置脏时不画：玩家看不见、场景又是静止的，画了纯属白烧 GPU，
+       而且画布每帧变化会让画布上的全屏毛玻璃每帧重算，正是菜单滑动卡顿的来源。 */
     if (Game.renderer && Game.scene && Game.camera) {
-      try {
-        Game.renderer.render(Game.scene, Game.camera);
-      } catch (e) {
-        // 渲染异常：只提示一次，并停止渲染循环 + 给出可见错误界面（避免用户一直黑屏无感知）
-        if (!Game._renderErrLogged) {
-          Game._renderErrLogged = true;
-          console.error('[game] 渲染异常', e);
-          Game._renderStopped = true;
-          fatal('渲染异常', '请尝试刷新页面或更换浏览器。');
-        }
+      if (isSceneCovered() && !Game._sceneDirty) {
+        // 本帧跳过渲染。注意这里**不能** return：上面的状态逻辑已经跑完，只有"画"这一步省掉
+      } else {
+        Game._sceneDirty = false;
+        renderScene();
       }
     }
   }
@@ -1744,6 +1854,11 @@
   function onSettingChanged(evt) {
     var settings = MG.Settings.get();
     if (!Game.camera) return;
+    /* BUG-066：菜单态默认不逐帧渲染，而这里的主题 / 雾 / 阴影 / 画质 / 色盲都会改 3D 画面
+       （场景背景色、灯光、雾色、材质需要重编译）。设置面板又是从菜单里打开的，
+       所以**每个**设置变更都要置一次脏，让下一帧重画。放在最前面统一置，
+       比在每个分支里补一遍可靠 —— 漏一个分支就是"改了设置但画面没反应"。 */
+    markSceneDirty();
 
     // FOV
     if (evt.key === 'fov' || evt.reset) {

@@ -362,6 +362,9 @@
         fps.last = now;
         var out = $('dev-fps');
         if (out) out.textContent = String(fps.value);
+        // BUG-066：顺手刷新长帧读数（同一处 500ms 节拍，不额外加定时器）
+        var lf = $('dev-longframes');
+        if (lf) lf.textContent = longFrameText();
       }
       fps.raf = global.requestAnimationFrame(tick);
     };
@@ -832,10 +835,33 @@
     lines.push('body class: ' + bodyClasses());
     lines.push('Three.js: ' + (global.THREE ? global.THREE.REVISION : '-'));
     lines.push('FPS: ' + fps.value);
+    lines.push('长帧(>25ms): ' + longFrameText());
     if (global.performance && global.performance.memory) {
       lines.push('JS 堆: ' + Math.round(global.performance.memory.usedJSHeapSize / 1048576) + ' MB');
     }
     return lines.join('\n');
+  }
+
+  /**
+   * 长帧统计文案（BUG-066）。
+   * 数据来自 main.js 主循环里的探针（`MG.Game.perf`）：按 10 秒窗口统计
+   * "两帧间隔 > 25ms"的次数。60fps 的预算是 16.7ms，超过 25ms 已经能感觉到顿一下，
+   * 所以这个数字比"平均 FPS"更能反映**滑动时的手感**。
+   * 为什么不用 fps.value：那是 startFps 自己的 rAF 计数，只在「环境」页开着时才跑，
+   * 玩家滑菜单的那几秒根本不在这个页面上 —— 量不到他真正遇到的问题。
+   * 探针挂在常驻的主循环上，所以"先滑一遍菜单、再回来开面板看数字"是有效的。
+   */
+  function longFrameText() {
+    var g = MG.Game;
+    var p = g && g.perf;
+    if (!p || !p.frames) return '暂无数据（主循环未跑满一个窗口）';
+    var nowFrames = p.frames;
+    var nowLong = p.longFrames;
+    // 同时给出"上一个完整窗口"的数：玩家停留在本页时，当前窗口的数字一直在长大
+    var prev = (p.lastFrames > 0)
+      ? ('；上一个 10 秒窗口 ' + p.lastLongFrames + ' / ' + p.lastFrames + ' 帧')
+      : '';
+    return nowLong + ' / ' + nowFrames + ' 帧（当前窗口累计）' + prev;
   }
 
   function renderEnv(box) {
@@ -861,6 +887,9 @@
         kv('body class', esc(bodyClasses())) +
         kv('Three.js', String(global.THREE ? global.THREE.REVISION : '-')) +
         kv('FPS', '<span id="dev-fps">0</span>') +
+        /* BUG-066：滑动卡顿的量尺。先退出面板去滑一遍菜单，再回来读这个数字 ——
+           探针挂在常驻主循环上，不依赖本页是否打开。 */
+        kv('长帧 &gt;25ms', '<span id="dev-longframes">—</span>') +
       '</div>' +
       '<details class="dev-details"><summary>User-Agent</summary>' +
         '<pre class="dev-pre">' + esc(global.navigator ? global.navigator.userAgent : '-') + '</pre></details>' +

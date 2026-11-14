@@ -347,7 +347,23 @@
     return !!(MG.game && MG.game.state === 'paused');
   }
 
-  /** 覆盖层面板（商店 / 排行榜 / 成就 / 签到）的统一返回落点 */
+  /**
+   * 当前是否停在一局"已通关、还没离开"的状态（BUG-065 的判据）。
+   * 此时胜利界面还在、关卡也没释放，`state === 'win'`。
+   */
+  function isWonGame() {
+    return !!(MG.game && MG.game.state === 'win');
+  }
+
+  /**
+   * 覆盖层面板（商店 / 排行榜 / 成就 / 签到）与设置面板的统一返回落点：
+   * 暂停局 → 暂停菜单；已通关 → 胜利界面；否则 → 主菜单。
+   *
+   * BUG-065（2026-11-14，用户口径 **A：回胜利界面**）：`state === 'win'` 时也进过这个函数
+   * （胜利界面上有开发者免密入口）。这一局**还没结束** —— 关卡在、结算已出，
+   * 直接甩回主菜单会让玩家看不到「再玩一次 / 看回放」，还会把 state 留在 'win' 的僵尸态
+   * （背景仍是那一局的画面）。所以按"回上一层"的直觉还原到胜利界面。
+   */
   function backFromOverlay() {
     if (isPausedGame()) {
       // 回暂停菜单：先清掉所有界面，再把 HUD 与暂停菜单摆回来。
@@ -357,6 +373,13 @@
       hideAllScreens();
       show('hud');
       show('pause-menu');
+      return;
+    }
+    if (isWonGame()) {
+      // 回胜利界面：内容还是通关时 showWin() 填好的那一份，这里只把界面摆回来（不重算结算，
+      // 否则会重复写记录 / 排行榜）。HUD 保持隐藏 —— 与 showWin() 的行为一致。
+      hideAllScreens();
+      show('win-screen');
       return;
     }
     // 从主菜单进来的：行为与修复前完全一致（含成绩 / 成就列表刷新）
@@ -400,7 +423,13 @@
       show('hud');
       if (settingsCallbacks.onCloseFromHud) settingsCallbacks.onCloseFromHud();
     } else {
-      show('main-menu');
+      /* 其余来源（主菜单 / 开发者面板「快速跳转 → 设置」）一律交给 backFromOverlay()
+         按"当前停在哪一层"现算：暂停局 → 暂停菜单，已通关 → 胜利界面，否则 → 主菜单。
+         BUG-065：原来这里写死 show('main-menu')，于是从"已通关"的胜利界面经开发者面板
+         进设置、再返回，会把主菜单盖在一局 state === 'win' 的僵尸对局上。
+         走同一个函数而不是再记一个来源，是为了不再重复"新增入口忘记传来源"的老问题
+         （BUG-056 → BUG-064 → 本条，三次都是同一个坑）。 */
+      backFromOverlay();
     }
   }
 

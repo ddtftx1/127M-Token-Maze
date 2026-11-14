@@ -448,6 +448,12 @@
       // 直接 showMainMenu 会把这一局留在 state==='playing' 的僵尸态（见 open() 的注释）。
       if (MG.UI && MG.UI.showPause) { MG.UI.showPause(); return; }
     }
+    /* BUG-065（2026-11-14，用户口径 A）：剩下的两种来源都交给 MG.UI.backFromOverlay() 现算 ——
+       主菜单进来 → 回主菜单；**已通关的胜利界面**进来 → 回胜利界面（state === 'win'）。
+       原来这里无条件 showMainMenu()，会把主菜单盖在一局 state === 'win' 的僵尸对局上，
+       玩家还看不到「再玩一次 / 看回放」的入口。走同一个函数而不是再加一个来源标记，
+       是为了不再重复"新增入口忘记传来源"的老坑（BUG-056 → BUG-064 → 本条）。 */
+    if (MG.UI && MG.UI.backFromOverlay) { MG.UI.backFromOverlay(); return; }
     if (MG.UI && MG.UI.showMainMenu) MG.UI.showMainMenu();
   }
 

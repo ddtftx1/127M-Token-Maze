@@ -17,6 +17,12 @@
   var MAX_ENTRIES = 10;
 
   var DIFF_KEYS = ['simple', 'medium', 'hard'];
+  /**
+   * 排行榜数据结构版本（2026-11-15 难度体系重构）。
+   * 2 = 简单 21×21 / 中等 31×31 / 困难 121×121；1 = 旧的 11×11 / 21×21 / 31×31。
+   * 用户口径：难度相关存档全部清空 —— 读盘发现版本不符就整份丢弃并删除该键。
+   */
+  var RANK_SCHEMA = 2;
 
   function safeGet(key) {
     try { return global.localStorage.getItem(key); } catch (e) { return null; }
@@ -60,17 +66,27 @@
   function loadAll() {
     var raw = safeGet(STORAGE_KEY);
     if (!raw) return normalize(null);
+    var parsed;
     try {
-      return normalize(JSON.parse(raw));
+      parsed = JSON.parse(raw);
     } catch (e) {
       console.warn('[ranking] 数据解析失败，已重置', e);
       return normalize(null);
     }
+    /* 难度体系重构（2026-11-15）：旧结构里的名次对应的迷宫尺寸已变，
+       按用户口径整份作废并删除该键，避免"新简单挂着旧难点成绩"的错配。 */
+    if (!parsed || typeof parsed !== 'object' || parsed.schema !== RANK_SCHEMA) {
+      try { global.localStorage.removeItem(STORAGE_KEY); } catch (e2) { /* 忽略 */ }
+      return normalize(null);
+    }
+    return normalize(parsed);
   }
 
   /** 保存全部排行榜数据 */
   function saveAll(data) {
-    safeSet(STORAGE_KEY, JSON.stringify(data));
+    safeSet(STORAGE_KEY, JSON.stringify({
+      schema: RANK_SCHEMA, simple: data.simple, medium: data.medium, hard: data.hard
+    }));
   }
   /** 排序比较：用时升序 → 步数升序 → 提交序号升序（完全同分时先提交者在前） */
   function compareEntries(a, b) {

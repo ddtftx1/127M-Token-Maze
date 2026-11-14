@@ -15,6 +15,14 @@
   var STORAGE_KEY = 'maze3d.settings.v1';
   /** 最佳记录 & 成就 存储键 */
   var RECORD_KEY = 'maze3d.records.v1';
+  /**
+   * 最佳记录表的结构版本（2026-11-15 难度体系重构）。
+   * 2 = 简单 21×21 / 中等 31×31 / 困难 121×121；1 = 旧的 11×11 / 21×21 / 31×31。
+   * 用户口径：难度相关存档**全部清空** —— 读盘发现版本不符就整份丢弃并删除该键，
+   * 否则会出现"新简单（21×21）挂着旧简单（11×11）的成绩"这种错配。
+   * 钱包 / 签到 / 设置与难度无关，不受影响（成就见下方 ACHIEVEMENTS 的注释）。
+   */
+  var RECORD_SCHEMA = 2;
   var ACHIEVE_KEY = 'maze3d.achievements.v1';
 
   /* ------------------------------------------------------------
@@ -189,10 +197,18 @@
       // 数组也算"不是记录表"：rec[diff] = {...} 写进数组后 JSON.stringify 会丢掉非下标键，
       // 等于成绩静默不落盘
       if (Object.prototype.toString.call(v) === '[object Array]') return {};
-      return v;
+      /* 难度体系重构（2026-11-15）：旧结构里的成绩对应的迷宫尺寸已经变了，
+         按用户口径整份作废并删除，避免错配。 */
+      if (v.schema !== RECORD_SCHEMA) {
+        try { global.localStorage.removeItem(RECORD_KEY); } catch (e2) { /* 隐私模式等：忽略 */ }
+        return {};
+      }
+      return (v.records && typeof v.records === 'object') ? v.records : {};
     } catch (e) { return {}; }
   }
-  function saveRecords(rec) { safeSet(RECORD_KEY, JSON.stringify(rec)); }
+  function saveRecords(rec) {
+    safeSet(RECORD_KEY, JSON.stringify({ schema: RECORD_SCHEMA, records: rec || {} }));
+  }
 
   /**
    * 提交一条成绩，仅当更优时更新
@@ -233,8 +249,10 @@
   var ACHIEVEMENTS = [
     { id: 'first_win',   name: '初次通关',       desc: '首次到达迷宫终点' },
     { id: 'no_autopath', name: '自力更生',       desc: '不使用自动寻路通关' },
-    { id: 'hard_win',    name: '勇者无畏',       desc: '困难难度通关' },
-    { id: 'fast_simple', name: '疾风步',         desc: '简单难度 40 秒内通关' },
+    /* 2026-11-15 难度重构：'hard_win' 现在指 121×121 巨型迷宫；'fast_simple' 的简单档从 11×11 升成 21×21，
+       阈值 40s → 90s（见 main.js 的判定）。成就 **id 不变**，所以老玩家已解锁的不会被回收。 */
+    { id: 'hard_win',    name: '勇者无畏',       desc: '困难难度（121×121 巨型迷宫）通关' },
+    { id: 'fast_simple', name: '疾风步',         desc: '简单难度 90 秒内通关' },
     { id: 'explorer',    name: '探险家',         desc: '累计通关 5 次' },
     { id: 'collector',   name: '收藏家',         desc: '单局收集所有金币' }
   ];

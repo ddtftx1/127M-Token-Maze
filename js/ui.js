@@ -1623,31 +1623,47 @@
     ctx.fillStyle = 'rgba(6,10,18,0.85)';
     ctx.fillRect(0, 0, mapSize, mapSize);
 
-    // 已探索通路
-    ctx.fillStyle = 'rgba(60,110,160,0.45)';
-    for (var y = 0; y < size; y++) {
-      for (var x = 0; x < size; x++) {
-        if (maze.grid[y * size + x] === 0 && player.explored[y * size + x]) {
-          ctx.fillRect(x * cellPx, y * cellPx, cellPx + 0.6, cellPx + 0.6);
+    /* ---------- 大迷宫降噪（2026-11-15，难度体系重构配套） ----------
+       先算聚合块大小 block：121×121 在手机上只有约 1.1px/格、桌面约 2.6px/格，
+       逐格 fillRect 既看不出格子、又要画 14641×2 次。
+       cellPx < 3 时按 block×block 聚合：**块内任一格已探索就点亮整块**，
+       用一格像素表达整块 —— 观感从"糊成一团的噪点"变成"能看出通道走向"。
+       block = 1（21×21 / 31×31 那两档）时与旧实现逐格等价。 */
+    var block = cellPx >= 3 ? 1 : (cellPx >= 1.5 ? 2 : 4);
+    function fillLayer(cellKind) {
+      for (var by = 0; by < size; by += block) {
+        for (var bx = 0; bx < size; bx += block) {
+          var hit = false;
+          for (var sy = by; sy < by + block && sy < size && !hit; sy++) {
+            for (var sx = bx; sx < bx + block && sx < size; sx++) {
+              var gi = sy * size + sx;
+              if (maze.grid[gi] === cellKind && player.explored[gi]) { hit = true; break; }
+            }
+          }
+          if (hit) {
+            ctx.fillRect(bx * cellPx, by * cellPx, cellPx * block + 0.6, cellPx * block + 0.6);
+          }
         }
       }
     }
 
+    // 已探索通路
+    ctx.fillStyle = 'rgba(60,110,160,0.45)';
+    fillLayer(0);
+
     // 探索到的墙体（用稍亮的颜色画出边界感）
     ctx.fillStyle = 'rgba(120,180,240,0.18)';
-    for (var wy = 0; wy < size; wy++) {
-      for (var wx = 0; wx < size; wx++) {
-        if (maze.grid[wy * size + wx] === 1 && player.explored[wy * size + wx]) {
-          ctx.fillRect(wx * cellPx, wy * cellPx, cellPx + 0.6, cellPx + 0.6);
-        }
-      }
-    }
+    fillLayer(1);
 
     // 金币：默认只显示已探索区域的实心点；
     // 开启「小地图显示全部金币」后，未探索区域的金币用半透明轮廓提示位置
     // （轮廓 vs 实心，明确区分"知道位置"与"亲自探索过"）
     var showAllCoins = !!(settings && settings.minimapCoins);
-    if (mazeView && mazeView.coins) {
+    if (block > 1) {
+      /* 大迷宫（121×121）：金币半径最少 2.2px，比一格（约 1.1px）还大，
+         画上去只会把地图糊成一片亮点。**直接不画金币** ——
+         起点 / 终点 / 玩家 / 寻路路径仍有标记，金币数量在 HUD 与道具面板里另有显示。 */
+    } else if (mazeView && mazeView.coins) {
       for (var c = 0; c < mazeView.coins.length; c++) {
         var coin = mazeView.coins[c];
         if (coin.collected) continue;
@@ -1790,10 +1806,13 @@
     mapCtx.translate(px, py);
     // yaw=0 时朝向 -Z（地图上方），换算成 canvas 角度
     mapCtx.rotate(-player.yaw);
+    /* 大迷宫下 cellPx 只有约 1.1px，按 cellPx 缩放玩家三角会小到看不见 →
+       给一个像素下限（21×21 时 cellPx≈6.3 已大于下限，观感不变）。 */
+    var mk = Math.max(cellPx, 5);
     mapCtx.beginPath();
-    mapCtx.moveTo(0, -cellPx * 0.55);
-    mapCtx.lineTo(cellPx * 0.38, cellPx * 0.45);
-    mapCtx.lineTo(-cellPx * 0.38, cellPx * 0.45);
+    mapCtx.moveTo(0, -mk * 0.55);
+    mapCtx.lineTo(mk * 0.38, mk * 0.45);
+    mapCtx.lineTo(-mk * 0.38, mk * 0.45);
     mapCtx.closePath();
     if (cb) {
       // 色盲：橙色三角 + 白色粗描边，尖端再补一个小箭头强调朝向
@@ -1803,9 +1822,9 @@
       mapCtx.lineWidth = Math.max(1.5, cellPx * 0.16);
       mapCtx.stroke();
       mapCtx.beginPath();
-      mapCtx.moveTo(0, -cellPx * 0.95);
-      mapCtx.lineTo(-cellPx * 0.16, -cellPx * 0.66);
-      mapCtx.lineTo(cellPx * 0.16, -cellPx * 0.66);
+      mapCtx.moveTo(0, -mk * 0.95);
+      mapCtx.lineTo(-mk * 0.16, -mk * 0.66);
+      mapCtx.lineTo(mk * 0.16, -mk * 0.66);
       mapCtx.closePath();
       mapCtx.fillStyle = '#ffffff';
       mapCtx.fill();

@@ -19,9 +19,10 @@
   /**
    * 布局版本（BUG-067，2026-11-14）。
    * 终点位置规则 / 关卡布局**一变就 +1**；回放与幽灵用它判断"同 seed 的旧记录是否还适用"
-   * （见 js/replay.js 的 load / prune）。v1 = 终点固定右下角；v2 = 远端随机。
+   * （见 js/replay.js 的 load / prune）。v1 = 终点固定右下角；v2 = 远端随机；
+   * v3 = 难度体系重构（删掉 11×11 档、两档改名、新增 121×121 巨型迷宫，各档参数随之变化）。
    */
-  var LAYOUT_VERSION = 2;
+  var LAYOUT_VERSION = 3;
 
   /** 终点候选门槛的兜底值：路径步数 ≥ 0.8 × 本局最远路径步数（各难度可用 endFarRatio 覆盖） */
   var DEFAULT_END_FAR_RATIO = 0.8;
@@ -30,39 +31,31 @@
    * 难度配置
    * ---------------------------------------------------------- */
   var DIFFICULTIES = {
+    /* 2026-11-15 难度体系重构（用户口径）：
+       删掉原「简单 11×11」，原「中等 21×21」升为**简单**，原「困难 31×31」升为**中等**，
+       新「困难」= **121×121（60×60 单元格）巨型迷宫**。
+       随之：难度相关的旧存档（最佳记录 / 排行榜 / 回放）按用户口径**全部清空**，
+       见 js/settings.js 的 RECORD_SCHEMA、js/ranking.js 的 RANK_SCHEMA 与 LAYOUT_VERSION。 */
     simple: {
       key: 'simple', name: '简单',
-      cells: 5,              // 5x5 单元格 → 11x11 网格
-      wallHeight: 2.5,
-      fogDensity: 0.00054,   // 很淡的雾（整体降低 40%，提升可见度）
-      fogColorHex: 0x0a1420,
-      autoPathMax: Infinity, // 预留，当前未使用（自动寻路无限次）
-      autoPathCooldown: 5,   // 预留，当前未使用（冷却很短）
+      cells: 10,             // 10x10 单元格 → 21x21 网格（原「中等」）
+      wallHeight: 3.0,
+      fogDensity: 0.012,     // 轻微迷雾，视野好
+      fogColorHex: 0x081018,
+      autoPathMax: Infinity, // 预留，当前未使用
+      autoPathCooldown: 30,  // 预留，当前未使用
       /* 终点候选门槛（BUG-067）：从起点出发的**路径步数** ≥ 0.8 × 本局最远路径步数，
          在这个候选区间里按种子随机取，不再固定右下角。数值越大终点越远、越难。 */
-      endFarRatio: 0.8,
-      coins: 3,
-      ceiling: true,
-      color: 0x2a4a6b
-    },
-    medium: {
-      key: 'medium', name: '中等',
-      cells: 10,             // 10x10 → 21x21
-      wallHeight: 3.0,
-      fogDensity: 0.012,     // 降低 40%，提升可见度
-      fogColorHex: 0x081018,
-      autoPathMax: 3,        // 预留，当前未使用
-      autoPathCooldown: 30,  // 预留，当前未使用
       endFarRatio: 0.8,
       coins: 6,
       ceiling: true,
       color: 0x2f5578
     },
-    hard: {
-      key: 'hard', name: '困难',
-      cells: 15,             // 15x15 → 31x31（GPU 友好，墙体仅几百个实例）
+    medium: {
+      key: 'medium', name: '中等',
+      cells: 15,             // 15x15 → 31x31（原「困难」）
       wallHeight: 3.5,
-      fogDensity: 0.0252,    // 雾较浓（整体降低 40%）
+      fogDensity: 0.0252,    // 雾较浓
       fogColorHex: 0x040a12,
       autoPathMax: 1,        // 预留，当前未使用
       autoPathCooldown: 60,  // 预留，当前未使用
@@ -70,6 +63,25 @@
       coins: 10,
       ceiling: true,
       color: 0x35507a
+    },
+    hard: {
+      key: 'hard', name: '困难',
+      /* 60x60 单元格 → **121x121** 网格（242 米见方）。生成器是迭代式、无递归深度问题；
+         实测：生成 43ms、BFS 17ms、墙体 7442 个 InstancedMesh 实例；
+         最远路径：裸迷宫约 2394 步，**打通环路后约 915 步（≈915 米）**（游戏里走的是后者），
+         即最短 4.2 分钟、含探索实际一局约 10~20 分钟。
+         小地图在这种密度下（手机约 1.1px/格）已无法逐格阅读，ui.js 里配了降噪（≤2px/格 时按块聚合、
+         不再画金币）。详见 README 的难度说明与 CHANGELOG 的难度体系重构一节。 */
+      cells: 60,
+      wallHeight: 4.0,
+      fogDensity: 0.03,      // 略浓于原困难：242 米的场地里避免"一眼看到对面"
+      fogColorHex: 0x03070e,
+      autoPathMax: 1,        // 预留，当前未使用
+      autoPathCooldown: 90,  // 预留，当前未使用
+      endFarRatio: 0.8,
+      coins: 60,             // 按面积/探索时长同比放大（原困难 10 枚 / 225 格 → 新困难 60 枚 / 3600 格）
+      ceiling: true,
+      color: 0x3f6088
     }
   };
 

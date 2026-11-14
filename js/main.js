@@ -706,7 +706,9 @@
     // 1) 生成迷宫数据
     var maze = MG.Maze.generate(diff.cells, seed, 'dfs');
     // 打通部分环路（简单难度多一些，减少死路）
-    var loopRatio = diff.key === 'simple' ? 0.10 : (diff.key === 'medium' ? 0.06 : 0.03);
+    /* 环路打通比例（2026-11-15 难度重构后重定）：迷宫越大越少打环路 —— 少环路=多死路=更要真探索。
+       简单 21×21 → 0.06、中等 31×31 → 0.03、困难 121×121 → 0.02。 */
+    var loopRatio = diff.key === 'simple' ? 0.06 : (diff.key === 'medium' ? 0.03 : 0.02);
     MG.Maze.carveLoops(maze, loopRatio);
 
     // 2) 起点终点
@@ -943,8 +945,11 @@
    */
   function autoPathCellLimit(kind) {
     if (kind === 'fast') return null;
+    /* 2026-11-15 难度重构后重定（用户口径）：简单 21×21 不限、中等 31×31 单次 60 格、困难 121×121 单次 80 格。
+       困难档这个 80 格约占其最短路径（打通环路后约 915 步）的 8.7% —— 刻意保留"道具帮助有限"；
+       若要按旧困难的比例（50/145 ≈ 34%）同比放大，应改成约 300，说一声即可调。 */
     if (Game.diffKey === 'medium') return 60;
-    if (Game.diffKey === 'hard') return 50;
+    if (Game.diffKey === 'hard') return 80;
     return null; // simple：完整走完
   }
 
@@ -1348,7 +1353,9 @@
     if (MG.Settings.unlockAchievement('first_win')) newAchievements.push('初次通关');
     if (!Game.usedAutoPath && MG.Settings.unlockAchievement('no_autopath')) newAchievements.push('自力更生');
     if (diff.key === 'hard' && MG.Settings.unlockAchievement('hard_win')) newAchievements.push('勇者无畏');
-    if (diff.key === 'simple' && Game.elapsed <= 40 && MG.Settings.unlockAchievement('fast_simple')) newAchievements.push('疾风步');
+    /* 疾风步阈值 40s → 90s（2026-11-15）：简单档从 11×11 升成 21×21，最短路径约 72 米 ≈ 20 秒
+       （打通环路后实测），正常人首次跑完约 30~60 秒；阈值随档位一起上调。成就 id 不变。 */
+    if (diff.key === 'simple' && Game.elapsed <= 90 && MG.Settings.unlockAchievement('fast_simple')) newAchievements.push('疾风步');
 
     var wins = MG.Settings.bumpCounter('wins');
     if (wins >= 5 && MG.Settings.unlockAchievement('explorer')) newAchievements.push('探险家');

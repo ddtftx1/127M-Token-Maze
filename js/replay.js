@@ -246,7 +246,10 @@
         var k = global.localStorage.key(i);
         if (k && k.indexOf(PREFIX) === 0) keys.push(k);
       }
-      if (keys.length <= limit) return;
+      /* 先扫一遍：布局版本不符的旧记录（BUG-067）**无条件清掉**，再看条数上限。
+         顺序很重要 —— 早期版本把 `keys.length <= limit` 的早退放在前面，
+         于是"只有一条旧布局记录、总数也没超上限"时它会一直留在库里（虽然被读到就会删，
+         但没被读到的就一直白占配额）。独立验证者指出后改成先清后判。 */
       var items = [];
       for (i = 0; i < keys.length; i++) {
         var savedAt = 0;
@@ -254,7 +257,6 @@
         try {
           var d = JSON.parse(global.localStorage.getItem(keys[i]) || '{}');
           savedAt = d.savedAt || 0;
-          // BUG-067：布局版本不符的旧记录一律清掉，别让它们占着配额
           if (d.layout !== layoutVersion()) stale = true;
         } catch (e) { /* 损坏数据视为最旧 */ }
         if (stale) {

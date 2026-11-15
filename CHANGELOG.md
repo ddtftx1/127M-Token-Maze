@@ -93,9 +93,10 @@
 | 回归 | `bug064-repro` 264/0 · `bug065-repro` 45/0 · `bug066-render` 41/0 · `bug067-end` 24/0 |
 | M2/M3 + BUG-069 自查（实现者脚本） | **70/70 PASS** |
 | M2/M3 的 main.js 接线端到端（Lead） | **14/14 PASS**（未解锁不可开 / 点小地图打开 / 非模态计时继续 / 120ms 节流确实在驱动 `drawMinimapFull` / `V` 开合 / **ESC 收起且不暂停** / 回菜单收起 / 菜单态不可开） |
-| 独立验证 | 见 `harness/bug069-verification.md`（另一个 AI 独立复核，**本版发布时仍在进行中**；
-报告到位后会在后续提交里补记，不改写本节已记录的内容）。另有 `harness/bug068-mutation.sh` 的
-变异测试证明冒烟断言没有被放宽 |
+| 独立验证 | **`harness/bug069-verify.js`：PASS 80 / FAIL 0（退出码 0，8 个分组全绿）**，在被测修订
+`cf9f234` 上复跑一致；脚本由**独立于实现者的验证者**编写（含 `616b310` 基线对照），
+但它在写出报告前被进程中断，报告 `harness/bug069-verification.md` 由 Lead 从其脚本输出整理
+——**归属说明已写在报告开头**。另有 `harness/bug068-mutation.sh` 的变异测试证明冒烟断言没有被放宽 |
 
 ## 改动文件汇总（本批）
 

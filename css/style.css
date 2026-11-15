@@ -596,6 +596,13 @@ html, body {
   /* 尺寸统一由 --minimap-size 给（见文件头的 :root 与 body[data-minimap-size] 覆盖） */
   width: var(--minimap-size);
   height: var(--minimap-size);
+  /* M2（2026-11-15）：小地图本体是"最大化"的入口，必须单独开指针事件 ——
+     #hud / .hud-right 都是 pointer-events:none（它们的意图是"不挡视角拖动"），
+     属性是继承的，不开这一条的话 canvas 收不到任何 click，入口等于不存在。
+     代价要说清：从此在小地图矩形内按下并滑动**不再转视角**（事件被本元素接住），
+     滑动视角请从小地图以外的留白处起手 —— 这正是用户口径 ①"留白穿透"的那片区域。 */
+  pointer-events: auto;
+  cursor: pointer;
 }
 
 #minimap {
@@ -639,6 +646,78 @@ html, body {
   color: #ffd980;
   background: rgba(255, 210, 74, 0.12);
   border: 1px solid rgba(255, 210, 74, 0.3);
+}
+
+/* ============================================================
+   最大化地图层（M2/M3，2026-11-15）
+   ------------------------------------------------------------
+   ── 为什么是"独立一层"而不是把 .minimap-wrap 原地放大 ──
+   小地图在 #hud 内、右上角、尺寸由 --minimap-size 管；最大化是"居中内接正方形 +
+   独立画布 + 独立 dpr 上限"的另一套状态。原地放大就得同时改一堆 HUD 定位规则，
+   收起后难以保证与原来一致；独立一层则"HUD 小地图怎么做，最大化前就是怎么做"。
+   绘制代码两边复用（js/ui.js 的同一套 drawMinimapStatic/drawMinimap），只有画布与缓存分开。
+
+   ── z-index:10 的落点（本方案最关键的一条，别改）──
+     #look-layer      5   在**下**：点在图上不会误触发 Pointer Lock（BUG-019 一族的坑）
+     本层             10   ← 这里
+     #hud / .joystick 20 / 22  在**上**：摇杆、道具、暂停按钮照常可点（用户口径 ③）
+     .screen          40  在**上**：道具 / 暂停 / 签到 / 幽灵弹窗永远盖得住地图 → 不互顶
+     .replay-bar/.toast 45 / 60 在**上**：回放条与提示不被遮
+   ← 所以本层的值只能落在 5 与 20 之间：调到 ≥20 会挡住摇杆与暂停按钮，
+     调到 ≤5 会被 #look-layer 盖住（点不到关闭按钮）。改前先回来读这段。
+
+   ── 指针事件（用户 2026-11-09 口径 ①）──
+   容器 pointer-events:none → 内接正方形之外的**留白不拦截任何事件**，
+   触摸/鼠标直接落到 #look-layer，最大化期间仍能滑动视角；
+   只有地图本体（.map-full-inner）与关闭按钮吃指针 —— 于是"想转视角"和"想关地图"
+   不会互相误伤（关闭只能靠 再点地图 / V / ESC / 关闭按钮）。
+   ============================================================ */
+.map-full {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;    /* 留白穿透到 #look-layer(5)，见上方说明 */
+  touch-action: none;      /* 与 #look-layer 同口径：不参与页面滚动/缩放 */
+  /* 刻意不给背景色：地图下方的 3D 画面保持可见，"留白"就是画面本身（用户已确认可接受） */
+  background: transparent;
+}
+
+/* 地图本体：正方形边长由 js/ui.js 用内联 width/height 给（按视口与安全区算），
+   这里只兜 0 尺寸，避免 JS 还没跑时出现一块抢事件的空盒子 */
+.map-full-inner {
+  position: relative;
+  width: 0;
+  height: 0;
+  pointer-events: auto;    /* 地图本体可以点（再点一次 = 收起） */
+}
+
+#map-full-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: 16px;
+  background: rgba(6, 10, 18, 0.92);
+  border: 1px solid rgba(120, 190, 255, 0.3);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+}
+
+/* 专用关闭按钮：贴地图一角（用户口径 ①：关闭只靠专用按钮 / V / ESC，不靠点留白）。
+   复用 .icon-btn 的尺寸与观感（44×44 触控热区、老内核模拟的实心色复位也一并继承），
+   这里只补"绝对定位 + 层级"——按钮必须在地图画布之上，否则点不到。 */
+.map-full-close {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 1;
+  font-size: 17px;
+  border-color: rgba(120, 190, 255, 0.4);
 }
 
 /* 虚拟摇杆（左下） */
@@ -1407,6 +1486,9 @@ html, body {
     --minimap-size: clamp(96px, min(30vw, 30vh), 320px);
   }
   #minimap { border-radius: 12px; }
+  /* 最大化地图：矮屏横屏下同步收一档（圆角与 #minimap 同口径；关闭按钮尺寸已由上面的 .icon-btn 收过） */
+  #map-full-canvas { border-radius: 12px; }
+  .map-full-close { top: 6px; right: 6px; font-size: 16px; }
 
   /* 极矮横屏（320 / 360 高）小地图缩小后，锁定占位文案与提示要能完整显示 */
   .minimap-lock { padding: 4px; gap: 2px; border-radius: 12px; }

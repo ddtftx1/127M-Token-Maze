@@ -37,6 +37,21 @@
    * 原 12000 帧（20 分钟）配合 24 局会撑爆 localStorage 5MB 配额，故同时下调条数与单局帧数
    */
   var MAX_FRAMES = 9000;
+  /**
+   * 巨型迷宫（网格边长 > 60，即 121×121 那一档）的采样间隔（秒）。
+   * 起因（2026-11-15 难度体系重构的连带问题）：MAX_FRAMES=9000 在默认 100ms 采样下只覆盖
+   * **15 分钟**，而新困难档一局 10~20 分钟 —— 100ms 采样会让回放/幽灵在途中被**静默截断**，
+   * 幽灵永远走不到终点（而幽灵对战的卖点就是"沿历史路径走到终点"）。
+   * 200ms 下 9000 帧可覆盖 30 分钟，代价是幽灵动作略粗（5Hz），对"看个大概路线"完全够用。
+   */
+  var LARGE_MAZE_INTERVAL = 0.2;
+  /** 网格边长超过这个值就算"巨型迷宫"（121×121 = 121；31×31 = 31 仍走默认 100ms） */
+  var LARGE_MAZE_SIZE = 60;
+
+  /** 按网格边长选采样间隔（秒）：普通迷宫 0.1，巨型迷宫 0.2（见上方注释） */
+  function pickSampleInterval(mazeSize) {
+    return (typeof mazeSize === 'number' && mazeSize > LARGE_MAZE_SIZE) ? LARGE_MAZE_INTERVAL : SAMPLE_INTERVAL;
+  }
 
   function safeGet(key) {
     try { return global.localStorage.getItem(key); } catch (e) { return null; }
@@ -63,12 +78,17 @@
   /* ------------------------------------------------------------
    * 记录器
    * ---------------------------------------------------------- */
-  function createRecorder() {
+  function createRecorder(opts) {
+    /* 采样间隔可注入（2026-11-15）：巨型迷宫要放粗到 200ms 才不会撞上 MAX_FRAMES 被截断，
+       见 pickSampleInterval 的注释。默认仍是 100ms，老调用方行为不变。 */
+    var interval = (opts && typeof opts.sampleInterval === 'number' && opts.sampleInterval > 0)
+      ? opts.sampleInterval : SAMPLE_INTERVAL;
     return {
       frames: [],
       acc: 0,
       time: 0,
       done: false,
+      sampleInterval: interval,
 
       /**
        * 每帧推进
@@ -87,8 +107,8 @@
           this.acc = 0;
           return;
         }
-        while (this.acc >= SAMPLE_INTERVAL && this.frames.length < MAX_FRAMES) {
-          this.acc -= SAMPLE_INTERVAL;
+        while (this.acc >= this.sampleInterval && this.frames.length < MAX_FRAMES) {
+          this.acc -= this.sampleInterval;
           this.frames.push(compressFrame(x, z, yaw, this.time));
         }
         if (this.frames.length >= MAX_FRAMES) this.acc = 0;
@@ -397,6 +417,9 @@
    * ---------------------------------------------------------- */
   MG.Replay = {
     SAMPLE_INTERVAL: SAMPLE_INTERVAL,
+    LARGE_MAZE_INTERVAL: LARGE_MAZE_INTERVAL,
+    MAX_FRAMES: MAX_FRAMES,
+    pickSampleInterval: pickSampleInterval,
     MAX_REPLAYS: MAX_REPLAYS,
     makeKey: makeKey,
     createRecorder: createRecorder,

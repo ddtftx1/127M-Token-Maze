@@ -1483,14 +1483,87 @@
     updateMinimapSizeBadge();
   }
 
-  /** 设置面板徽标：当前档位 + 实际像素（没测量到尺寸时只显示档位） */
+  /**
+   * 把 "261.1px" 这类**纯像素**字面量解析成数字；其它形态（clamp(...) / '' / 百分比）返回 0。
+   * 只认纯 px 是刻意的：只要出现函数或相对单位就说明"这个值还没被浏览器求值"，
+   * 交给下面探针那条路，绝不在 JS 里自己算。
+   */
+  function parseCssPx(v) {
+    var m = /^\s*([0-9]*\.?[0-9]+)px\s*$/.exec(String(v == null ? '' : v));
+    return m ? parseFloat(m[1]) : 0;
+  }
+
+  /** 尺寸探针（懒创建并复用；只在读不到容器宽度时才会用到） */
+  var minimapProbe = null;
+
+  /**
+   * 读「当前档位 / 视口在 CSS 里对应的实际像素尺寸」——BUG-069 的核心（2026-11-15）。
+   *
+   * ── 为什么需要它 ──
+   * 设置面板打开时 showSettings() 会 hide('hud')，而 .minimap-wrap 在 #hud 里，
+   * display:none 之下 clientWidth === 0 → resizeMinimap() 量不到容器，
+   * 徽标只能沿用上一次的测量值（或 init 的兜底 168），于是用户看到
+   * "设置里调小地图大小，数值不实时刷新，必须退出设置再进来"。
+   *
+   * ── 为什么不把那几条 clamp 公式抄进 JS 算 ──
+   * --minimap-size 是 CSS 里**唯一事实源**（BUG-062 起）：公式里含 clamp()/min()/vw/vh/vmin，
+   * 还有横屏矮屏的 :root 覆盖与 body[data-minimap-size] 四档覆盖。JS 再写一份就是两处漂移 ——
+   * 以后调 CSS 忘了改 JS，徽标会报一个与真实渲染尺寸不同的假数字，
+   * 而这正是既有的"读盘侧/写盘侧口径不一致"那类坑（BUG-046/051 的教训）。
+   * 所以这里**只测量、不计算**，按可靠性依次尝试：
+   *   ① 容器可见 → 直接量 clientWidth（最准，含所有媒体查询与兜底）；
+   *   ② 容器隐藏 → 读 --minimap-size；若是纯 px（老内核兜底档 / 纯 px 档）直接用；
+   *   ③ 否则挂一个探针元素、width:var(--minimap-size)，**让浏览器自己的 CSS 引擎**
+   *      把 clamp/min/vmin 求值成像素再量（现代浏览器里自定义属性的计算值按规范
+   *      **不会**展开数学函数，第②步读到的会是 "clamp(120px, min(34vw, 34vh), 320px)" 字面量，
+   *      所以这一步不是多余的）；
+   *   ④ 都测不到（无头测试环境没有布局引擎）→ 返回 0，由调用方"宁可不显示像素值"。
+   * @returns {number} 像素尺寸；测不到返回 0
+   */
+  function readMinimapSizePx() {
+    // ① 容器可见：量真实渲染尺寸（会含 border 吗？.minimap-wrap 无边框，clientWidth 即内容宽）
+    if (el['minimap'] && el['minimap'].clientWidth) return Math.round(el['minimap'].clientWidth);
+
+    // ② CSS 变量：纯 px 字面量（不依赖布局，无头环境里这一条也能先命中老内核兜底值）
+    var raw = '';
+    try { raw = window.getComputedStyle(document.body).getPropertyValue('--minimap-size'); } catch (e) { raw = ''; }
+    var px = parseCssPx(raw);
+    if (px > 0) return Math.round(px);
+
+    // ③ 探针：把求值交给浏览器（body 可见即可用，与 #hud 是否隐藏无关）
+    try {
+      if (!minimapProbe) {
+        minimapProbe = document.createElement('div');
+        /* 与 .minimap-wrap 同口径：块级、无内外边距/边框（全局 * { box-sizing:border-box } 下也一样），
+           并且 width 用同一个变量 → 档位/媒体查询变化时它会跟着变，不需要重建。
+           left:-9999px + visibility:hidden + aria-hidden：不进视野、不被读屏朗读，
+           也不参与命中测试（pointer-events:none 双保险）。 */
+        minimapProbe.style.cssText =
+          'position:absolute;left:-9999px;top:0;display:block;height:0;' +
+          'width:var(--minimap-size);visibility:hidden;pointer-events:none;';
+        minimapProbe.setAttribute('aria-hidden', 'true');
+        if (document.body) document.body.appendChild(minimapProbe);
+      }
+      var w = minimapProbe.offsetWidth || minimapProbe.clientWidth || 0;
+      if (w > 0) return Math.round(w);
+    } catch (e) { /* 忽略：老内核不支持 var() 或环境无布局，落到 ④ */ }
+
+    // ④ 测不到：返回 0。调用方据此**不显示像素值** ——
+    //    显示"档位"总比显示一个陈旧/错误的数字强（这正是 BUG-069 的表现）。
+    return 0;
+  }
+
+  /** 设置面板徽标：当前档位 + 实际像素（测不到尺寸时只显示档位，绝不显示陈旧值） */
   function updateMinimapSizeBadge() {
     var node = el['set-minimap-size-state'];
     if (!node) return;
     var mode = S.get().minimapSize || 'auto';
     var label = mode === 'auto' ? '自动'
       : (mode === 'small' ? '小' : (mode === 'medium' ? '中' : '大'));
-    if (mapSize > 0) label += ' · ' + mapSize + 'px';
+    /* 注意这里**不能**再用 mapSize：那是"上一次真正测量到的 HUD 画布尺寸"，
+       设置面板打开时它就是陈旧值（BUG-069 的根因）。改用 readMinimapSizePx() 现测。 */
+    var px = readMinimapSizePx();
+    if (px > 0) label += ' · ' + px + 'px';
     if (node.textContent !== label) node.textContent = label;
   }
 

@@ -809,8 +809,15 @@
     //        必须晚于上面的 mapFound=false 与重新上锁，否则开关等于无效
     if (isSandbox && MG.Dev && typeof MG.Dev.afterBuild === 'function') MG.Dev.afterBuild();
 
-    // 7.2) 回放记录器：记录本局路径（每 100ms 一帧）
-    if (MG.Replay) Game.recorder = MG.Replay.createRecorder();
+    /* 7.2) 回放记录器：记录本局路径。
+       采样间隔按迷宫大小选：普通 100ms、**巨型迷宫（121×121）200ms** ——
+       否则 9000 帧的硬上限只覆盖 15 分钟，而新困难档一局 10~20 分钟，回放/幽灵会被静默截断。 */
+    if (MG.Replay) {
+      Game.recorder = MG.Replay.createRecorder({
+        sampleInterval: MG.Replay.pickSampleInterval
+          ? MG.Replay.pickSampleInterval(maze.size) : undefined
+      });
+    }
 
     // 7.3) 幽灵：按 ghostMode 分支加载（弹窗确认已在 loading 界面之前完成）
     disposeGhost();

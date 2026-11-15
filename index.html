@@ -127,7 +127,7 @@
         </div>
         <div id="compass-dist" class="compass-dist">0</div>
       </div>
-      <div class="minimap-wrap">
+      <div id="minimap-wrap" class="minimap-wrap">
         <canvas id="minimap" width="200" height="200"></canvas>
         <div id="minimap-lock" class="minimap-lock">
           <div class="minimap-lock-icon"><span class="svg-icon" data-icon="map"></span></div>
@@ -149,6 +149,25 @@
       <button id="btn-cancel-path" class="action-btn danger hidden">取消寻路</button>
     </div>
 
+  </div>
+
+  <!-- ================= 最大化地图层（M2/M3，2026-11-15 · 非模态） =================
+       ⚠ 必须放在 #hud **之外**（#app 下、与 #hud 平级）：
+         openItemPanel() 会走 MG.UI.hide('hud')，若这层在 #hud 里面，
+         一开道具栏地图就跟着消失 —— 而用户要求"看着地图用道具（如最佳路径）"。
+       ⚠ 也不要给它 .screen：它不进 hideAllScreens() 体系，
+         因此不会触发 MG.Dev.onScreenShown() 的"顶替回调"（BUG-036 的坑），
+         也永远不会把签到 / 道具 / 暂停面板顶掉。
+       z-index:10 由 CSS 给：压在 #look-layer(5) 之上、#hud(20)/摇杆(22) 之下，
+       于是摇杆照常能推、面板(.screen 40) 永远盖在地图上（M3 冲突清单）。
+       容器 pointer-events:none → 正方形外的留白直接穿透到 #look-layer，
+       最大化期间仍能滑动视角；只有地图本体与关闭按钮吃指针（用户 2026-11-09 口径 ①）。 -->
+  <div id="map-full" class="map-full hidden">
+    <div id="map-full-inner" class="map-full-inner">
+      <canvas id="map-full-canvas"></canvas>
+      <button id="btn-map-full-close" class="icon-btn map-full-close" type="button"
+              title="收起地图 (V / ESC)">✖</button>
+    </div>
   </div>
 
   <!-- 消息提示（全局层：菜单 / HUD / 面板内均可显示） -->

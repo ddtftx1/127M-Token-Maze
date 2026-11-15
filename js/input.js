@@ -4,7 +4,7 @@
  * - 手机：左下虚拟摇杆（触摸拖动、松手回中）+ 空白区域滑动转视角
  * - 电脑：WASD / 方向键移动，Pointer Lock 鼠标转视角（点击画面锁定，ESC 退出）
  * - 阻止页面滚动、缩放、长按菜单
- * - 快捷键：R 重开 / M 小地图 / P·ESC 暂停 / F 自动寻路
+ * - 快捷键：R 重开 / M 小地图 / V 最大化地图 / P·ESC 暂停 / F 自动寻路
  * ============================================================ */
 (function (global) {
   'use strict';
@@ -56,6 +56,12 @@
     this.onPause = null;
     this.onRestart = null;
     this.onToggleMinimap = null;
+    /* V 键：最大化地图开合（M2/M3，2026-11-15）。
+       为什么另开一个回调而不是复用 onToggleMinimap：用户口径（设计文档 Q11）要求
+       `M` 保持"小地图开/关"语义不变，最大化是**另一个键**；
+       两者语义不同、生命周期也不同（最大化要收起/放画布/改 dpr），不能挤进一个回调里，
+       否则 main.js 侧就得靠"当前是否最大化"猜 M 想干什么 —— 那种隐式状态最容易互顶。 */
+    this.onToggleMapFull = null;
     this.onAutoPath = null;
     this.onToggleItems = null;  // F 键：道具面板开合（新语义）
     this.onFirstInput = null;   // 首次输入（用于解锁音频）
@@ -231,9 +237,10 @@
       var k = e.key.toLowerCase();
       self.keys[k] = true;
       /* 移动键要在重复事件里持续为 true，所以先记状态、再挡重复。
-         下面的一次性快捷键（R/M/P/F/ESC）绝不能吃 e.repeat：
+         下面的一次性快捷键（R/M/V/P/F/ESC）绝不能吃 e.repeat：
          按住 R 不放时浏览器每 ~33ms 派发一次 keydown，
-         原来会让 restartGame → disposeLevel + buildLevel 连跑几十次（黑屏/卡死）。 */
+         原来会让 restartGame → disposeLevel + buildLevel 连跑几十次（黑屏/卡死）。
+         同样的理由也适用于 V：每 33ms 反复 toggle 会让最大化层一顿乱闪。 */
       if (e.repeat) return;
       // 方向键 / 空格阻止页面滚动
       if (['arrowup', 'arrowdown', 'arrowleft', 'arrowright', ' '].indexOf(k) >= 0) e.preventDefault();
@@ -251,6 +258,11 @@
         // F = 道具面板（新）；优先新回调，兼容旧 onAutoPath
         if (self.onToggleItems) self.onToggleItems();
         else if (self.onAutoPath) self.onAutoPath();
+      }
+      else if (k === 'v') {
+        /* V = 最大化地图开合（新增键，与 M 的小地图开关语义分开 —— 设计文档 Q11）。
+           回调缺失时**什么都不做**：这条键在旧版本里没有语义，静默比误触发安全。 */
+        if (self.onToggleMapFull) self.onToggleMapFull();
       }
       else if (k === 'escape') {
         if (self.pointerLocked) {

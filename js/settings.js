@@ -45,7 +45,10 @@
     theme: 'tech',        // 主题 tech | dungeon | forest
     colorblind: false,    // 色盲友好模式
     ghostMode: 'ask',     // 幽灵对手：ask=询问 | always=总是启用 | never=从不启用
-    autoPerformance: true // 自动性能适配（低端机自动降画质）
+    autoPerformance: true, // 自动性能适配（低端机自动降画质）
+    /* ── 2026-11-15 性能三件套的两个开关（用户逐项选定）── */
+    perfMode: false,      // 性能模式（激进，默认关）：一键降级，聚合 quality→low + 关阴影 + 小地图降频 + 强制视距裁剪
+    viewCull: false       // 视距裁剪（默认关）：只绘制玩家附近的墙体；性能模式下**强制生效**但本字段不动
   };
 
   /** 当前设置（深拷贝默认值） */
@@ -92,6 +95,10 @@
     }
     // 自动性能适配：低端设备首次进入时自动降低画质
     if (settings.autoPerformance) autoDetectPerformance();
+    /* 读盘自愈（性能模式）：存档里 perfMode=true 但 quality/shadows 不是降级值
+       （手改档 / 半截写入 / 旧版本遗留）时，按性能模式的口径重新降级一次，
+       并把"档里原本的值"记为备份 —— 于是关掉开关时回到的是存档写的值而不是出厂值。 */
+    if (settings.perfMode) enterPerfMode();
     return settings;
   }
 
@@ -117,6 +124,11 @@
     // 幽灵对手：仅接受合法枚举值
     if (['ask', 'always', 'never'].indexOf(data.ghostMode) >= 0) settings.ghostMode = data.ghostMode;
     if (typeof data.autoPerformance === 'boolean') settings.autoPerformance = data.autoPerformance;
+    /* 性能三件套开关的读盘守卫（历史 BUG-046/051/052/058 都出在"缺守卫"上）：
+       只接受真正的布尔值 —— 手改档里写 "true" / 1 / null 一律忽略，保持默认，
+       否则会出现"设置里明明是关的，行为却按开算"这类无法复现的怪现象。 */
+    if (typeof data.perfMode === 'boolean') settings.perfMode = data.perfMode;
+    if (typeof data.viewCull === 'boolean') settings.viewCull = data.viewCull;
   }
 
   /** 低端设备自动降配：内存/核心数偏低时降低画质与像素比 */
@@ -141,6 +153,54 @@
     safeSet(STORAGE_KEY, JSON.stringify(settings));
   }
 
+  /* ------------------------------------------------------------
+   * 性能模式（激进）的级联：记住旧值 → 降级 → 关闭时恢复
+   * ------------------------------------------------------------
+   * 用户口径（2026-11-15）：
+   *   ① 打开时把 quality 写成 low、shadows 写成 false —— **写进设置**，
+   *      让玩家在设置面板里看得见当前值（不是偷偷降级）；
+   *   ② 记住打开前的值，关闭时恢复；
+   *   ③ 不静默改存档里的其它字段。
+   *
+   * 为什么"备份"只放在内存、不落盘：
+   *   往存档里塞 perfPrevQuality / perfPrevShadows 两个隐藏字段属于**结构变更**，
+   *   而本项目的存档结构变更历史上出过一串 BUG（见交接书 §3.2）。代价是
+   *   "开了性能模式之后刷新页面、再关掉"只能恢复出厂画质（mid/关）——
+   *   这一点在交付报告里如实标注，不做隐瞒；设置面板里两项都是可见可改的，
+   *   玩家不会被困在低画质里。
+   * ── 为什么级联不调用 S.set('quality', ...) ──
+   *   setSetting 末尾会无条件 emit；在 set('perfMode') 的处理里再 set('quality')
+   *   就会重入 onSettingChanged。虽然只要不在 quality 分支里回写 perfMode 就不会
+   *   无限递归，但那种"靠调用方自觉"的写法太脆：这里直接写生效值，
+   *   只广播**一次** perfMode 事件，由 main.js 把 quality/shadows 的效果一并应用。
+   * ---------------------------------------------------------- */
+  /** 性能模式打开前的 {quality, shadows}；null = 当前没开性能模式 / 备份已消费 */
+  var perfBackup = null;
+
+  /** 进入性能模式：记录旧值并降级（只动 quality / shadows 两个字段） */
+  function enterPerfMode() {
+    if (!perfBackup) perfBackup = { quality: settings.quality, shadows: settings.shadows };
+    settings.quality = 'low';
+    settings.shadows = false;
+  }
+
+  /** 退出性能模式：恢复旧值（没有备份时回落到默认值，绝不把 low/关 当成"恢复"） */
+  function exitPerfMode() {
+    if (perfBackup) {
+      settings.quality = perfBackup.quality;
+      settings.shadows = perfBackup.shadows;
+    } else {
+      settings.quality = DEFAULT_SETTINGS.quality;
+      settings.shadows = DEFAULT_SETTINGS.shadows;
+    }
+    perfBackup = null;
+  }
+
+  /** 当前是否有性能模式的备份（测试 / 排错用；只读） */
+  function peekPerfBackup() {
+    return perfBackup ? { quality: perfBackup.quality, shadows: perfBackup.shadows } : null;
+  }
+
   /** 修改单个设置项并广播（realTime 表示是否需要立即作用于引擎） */
   function setSetting(key, value) {
     if (!(key in DEFAULT_SETTINGS)) return;
@@ -152,6 +212,20 @@
     mergeValidated(probe);
     // 用户手动改过画质 → 关掉自动性能适配，避免下次加载被静默降回 mid
     if (key === 'quality') settings.autoPerformance = false;
+    /* 画质 / 阴影被玩家手动改成"与性能模式相反的值" → 性能模式自动退出
+       （否则会出现"开关开着、画质却是高"的自相矛盾状态）。
+       直接改字段、不重入 set：本函数末尾只广播一次原事件。
+       注意**不恢复**备份：玩家刚刚手动改的那一项就是他要的，不能被我们改回去。 */
+    if ((key === 'quality' || key === 'shadows') && settings.perfMode &&
+        (settings.quality !== 'low' || settings.shadows !== false)) {
+      settings.perfMode = false;
+      perfBackup = null;
+    }
+    // 性能模式的一键降级 / 恢复（见上方注释）
+    if (key === 'perfMode') {
+      if (settings.perfMode) enterPerfMode();
+      else exitPerfMode();
+    }
     saveSettings();
     // 广播生效值而不是入参：非法入参被校验丢弃时，监听者拿到的必须是真正生效的值
     emit({ key: key, value: settings[key], settings: settings });
@@ -166,6 +240,8 @@
   /** 重置为默认设置 */
   function resetSettings() {
     settings = assign({}, DEFAULT_SETTINGS);
+    // 重置会关掉性能模式：备份必须一起清，否则下次打开性能模式会"恢复"到重置前的旧值
+    perfBackup = null;
     saveSettings();
     emit({ key: '*', value: null, settings: settings, reset: true });
     return settings;
@@ -313,6 +389,8 @@
     reset: resetSettings,
     onSettingChange: onSettingChange,
     clamp: clamp,
+    // 性能模式（2026-11-15）：备份快照只读出口，供无头自证脚本断言"关闭后完全恢复"
+    peekPerfBackup: peekPerfBackup,
     // 记录 / 成就
     loadRecords: loadRecords,
     submitRecord: submitRecord,

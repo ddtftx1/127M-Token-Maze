@@ -167,6 +167,11 @@
       <canvas id="map-full-canvas"></canvas>
       <button id="btn-map-full-close" class="icon-btn map-full-close" type="button"
               title="收起地图 (V / ESC)">✖</button>
+      <!-- 缩放倍数指示（用户 2026-11-15 口径 ④：角落显示当前倍数）。
+           ⚠ 必须 pointer-events:none（见 CSS 的 .map-full-zoom）：它盖在地图左下角，
+             一旦吃指针，玩家就拖不动那一小块区域了。文案由 js/ui.js 的
+             updateMapFullZoomBadge() 写（1× 也显示 "1.0×"，让玩家知道这张图能缩放）。 -->
+      <div id="map-full-zoom" class="map-full-zoom" aria-live="off">1.0×</div>
     </div>
   </div>
 
@@ -234,6 +239,20 @@
             <label for="set-fog">雾效</label>
             <input id="set-fog" class="switch" type="checkbox" />
           </div>
+          <!-- 性能三件套的开关（用户 2026-11-15 逐项选定；默认为关）。
+               口径：性能模式是"一键降级"的聚合开关 —— 打开时会把**画质写成低、阴影关掉**
+               （所以在上面两行里能直接看到当前值）、小地图刷新从 120ms 放宽到 300ms、
+               并强制开启下面的视距裁剪；关闭时恢复打开前的画质与阴影。
+               视距裁剪是独立开关，只影响 3D 墙体（小地图与信息口径完全不变）。 -->
+          <div class="setting-row switch-row">
+            <label for="set-perf-mode">性能模式（激进）</label>
+            <input id="set-perf-mode" class="switch" type="checkbox" />
+          </div>
+          <div class="setting-row switch-row">
+            <label for="set-view-cull">视距裁剪（只画附近墙体）</label>
+            <input id="set-view-cull" class="switch" type="checkbox" />
+          </div>
+          <p class="setting-hint">性能模式：一键降级为低画质 + 关阴影 + 小地图降频 + 强制视距裁剪（关闭后恢复原设置）。视距裁剪按区块只绘制玩家附近约 45 格的墙体，远处被雾遮住的墙不再参与绘制；不影响小地图与已探索信息。</p>
           <div class="setting-row switch-row">
             <label for="set-minimap-toggle">小地图 <span id="set-minimap-state" class="setting-lock hidden">未解锁</span></label>
             <input id="set-minimap-toggle" class="switch" type="checkbox" />

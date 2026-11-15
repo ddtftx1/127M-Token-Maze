@@ -52,6 +52,10 @@
     ambient: null,
     sun: null,
     _hudAccum: 0,
+    /* 视距裁剪（2026-11-15）：上一次"玩家格变化"的格坐标。
+       -1 是"还没有记录"的哨兵值 —— 开局后第一帧必定与真实格不同，从而触发一次计算。 */
+    _cullCellX: -1,
+    _cullCellY: -1,
     _portalAccum: 0,      // 传送门环境音触发节流
     _startPending: false,
     _achieveToastTimer: null, // 通关后延迟弹出成就提示的定时器（离开本局时清理）
@@ -755,6 +759,12 @@
 
     // 6) 玩家（相机位于起点）
     Game.player = new MG.Player(Game.camera, maze, diff, MG.UI.el['game-canvas']);
+    /* 6.1) 视距裁剪（性能三件套之二）：按当前设置作用于新关卡。
+       必须在玩家建好之后：锚点优先取玩家格（MazeView 里没有记录时会退回 maze.start，
+       两者在主游戏里是同一格；这里显式重置哨兵，让主循环第一帧用**真实玩家格**再算一次）。 */
+    Game._cullCellX = -1;
+    Game._cullCellY = -1;
+    applyViewCullToLevel();
     // 沙盒收尾（隐藏传送门 / 光点 / 粒子 / 卷轴 + 按开关自动解锁小地图）放在 7.1 之后：
     // 它会置 mapFound=true 并解锁小地图，若在这里调用，会被后面"mapFound=false + 重新上锁"覆盖
     Game.player.onAutoFinish = function () {
@@ -1462,6 +1472,11 @@
     Game.replayPlaying = true;
     Game.replayView = 'follow';
     Game.state = 'replay';
+    /* 视距裁剪（性能三件套之二）：回放态强制关。
+       回放的 top 全景视角把相机拉到迷宫正上方俯视，按"玩家距离"裁剪会把远处的墙整片抹掉
+       —— 那是肉眼可见的视觉回归。applyViewCullToLevel 内部看 Game.state 现算，
+       所以这里只需要"状态已改"之后调一次，不必把开关状态传进去。 */
+    applyViewCullToLevel();
 
     // 回放期间暂时关闭雾，保证能看清幽灵
     if (Game.scene) Game.scene.fog = null;
@@ -1478,6 +1493,8 @@
   function exitReplay() {
     if (Game.state !== 'replay') return;
     Game.state = 'win';
+    // 视距裁剪：退出回放后按设置重新生效（回放期间是强制关的，见 startReplay）
+    applyViewCullToLevel();
     if (Game.replayGhost) {
       Game.replayGhost.dispose();
       Game.replayGhost = null;
@@ -1561,7 +1578,12 @@
       replayRaycaster.far = maxDist;
       var raycaster = replayRaycaster;
       if (Game.mazeView && Game.mazeView.walls) {
-        var hits = raycaster.intersectObject(Game.mazeView.walls);
+        /* 2026-11-15 墙体合并：`walls` 从单个 InstancedMesh 变成 Group（每区块一个 Mesh），
+           所以**必须递归**求交（intersectObject 的第 2 个参数 recursive=true）。
+           不传的话射到 Group 上什么也打不到 —— 表现为回放跟随相机在窄巷里
+           直接埋进墙体（改造前专门修过这个"画面变黑"，别退回去）。
+           注：three r125+ 的默认值就是 true，这里显式写出来是为了不依赖版本默认值。 */
+        var hits = raycaster.intersectObject(Game.mazeView.walls, true);
         if (hits.length > 0) {
           var safeDist = Math.max(1.0, hits[0].distance - 0.3);
           cam.position.copy(origin).addScaledVector(toCam, safeDist);
@@ -1825,9 +1847,22 @@
         updateHudData();
       }
 
-      // 9) 小地图（每 120ms 重绘一次；找到地图道具后才绘制）
+      /* 8.5) 视距裁剪（性能三件套之二）：只在**玩家格真的变了**时进函数，
+         函数内部还有"每 3 格才算一次"的节流 —— 绝不每帧全量遍历 ~250 个区块。
+         关闭时整个分支早退（默认就是这个状态，零开销）。 */
+      if (Game.mazeView && Game.mazeView.viewCullEnabled &&
+          typeof Game.mazeView.updateViewCulling === 'function') {
+        var cullGrid = Game.player.getGrid();
+        if (cullGrid.x !== Game._cullCellX || cullGrid.y !== Game._cullCellY) {
+          Game._cullCellX = cullGrid.x;
+          Game._cullCellY = cullGrid.y;
+          Game.mazeView.updateViewCulling(cullGrid.x, cullGrid.y);
+        }
+      }
+
+      // 9) 小地图（普通 120ms 重绘一次；性能模式放宽到 300ms —— 见 mapDrawIntervalSec）
       lastMapDraw += dt;
-      if (lastMapDraw >= 0.12) {
+      if (lastMapDraw >= mapDrawIntervalSec()) {
         lastMapDraw = 0;
         if (Game.mapFound) MG.UI.drawMinimap(Game.player, Game.maze, Game.mazeView, settings);
         /* 最大化地图（M2/M3）共用同一份节流：ui.js 不开自己的定时器。
@@ -1893,6 +1928,31 @@
     lastMapDraw = 999;
   }
 
+  /**
+   * 视距裁剪（2026-11-15 性能三件套之二）：把"是否裁剪"下发给关卡。
+   * 生效值 = 设置里的独立开关 **或** 性能模式（性能模式强制开，见 js/settings.js）。
+   * 为什么不直接遍历 walls：块元数据（含墙檐块）只有 MazeView 知道；
+   * main.js 只负责"什么时候算"（换关 / 切设置 / 玩家跨格）与"开关值来自哪里"。
+   * ⚠ 回放态强制关：回放有 top 全景视角，相机在迷宫正上方，按玩家距离裁剪会把远处的墙
+   * 整片抹掉 —— 那就是"回放画面缺墙"的视觉回归（这里主动兜住，不靠玩家去关设置）。
+   */
+  function applyViewCullToLevel() {
+    if (!Game.mazeView || typeof Game.mazeView.setViewCulling !== 'function') return false;
+    var s = MG.Settings.get();
+    var on = !!(s.viewCull || s.perfMode);
+    if (Game.state === 'replay') on = false;
+    return Game.mazeView.setViewCulling(on);
+  }
+
+  /**
+   * 小地图重绘间隔（秒）。
+   * 普通 120ms；性能模式下放宽到 300ms（用户 2026-11-15 口径）。
+   * 每次现读设置：省掉"记一份状态、切档时还要记得更新"的漂移风险（那类 bug 本项目出过多次）。
+   */
+  function mapDrawIntervalSec() {
+    return (MG.Settings.get().perfMode ? 300 : 120) / 1000;
+  }
+
   function onSettingChanged(evt) {
     var settings = MG.Settings.get();
     if (!Game.camera) return;
@@ -1921,8 +1981,8 @@
       }
     }
 
-    // 阴影
-    if (evt.key === 'shadows' || evt.reset) {
+    // 阴影（性能模式会级联把 shadows 写成 false，所以它也要进这个分支 —— 见 setSetting 的注释）
+    if (evt.key === 'shadows' || evt.key === 'perfMode' || evt.reset) {
       var shadowsOn = !!settings.shadows;
       /* 阴影的最终口径是"总开关 && 不是低画质"，必须与 build() 里的 needShadows
          以及 MazeView.applyQuality() 保持一致：只按总开关走的话，
@@ -1933,7 +1993,12 @@
         Game.renderer.shadowMap.enabled = shadowsOn;
       }
       if (Game.sun) Game.sun.castShadow = shadowsOn;
-      if (Game.mazeView && Game.mazeView.walls) {
+      /* walls 现在是 Group（2026-11-15 墙体合并）：Group 上写 castShadow 不会传到子 Mesh，
+         必须走 MazeView.setWallShadow() 逐块设置。没有这个方法时（版本漂移）
+         退回旧写法，宁可少一次递归也不能让设置面板整块失效。 */
+      if (Game.mazeView && typeof Game.mazeView.setWallShadow === 'function') {
+        Game.mazeView.setWallShadow(shadowsRecv);
+      } else if (Game.mazeView && Game.mazeView.walls) {
         Game.mazeView.walls.castShadow = shadowsRecv;
         Game.mazeView.walls.receiveShadow = shadowsRecv;
       }
@@ -1966,7 +2031,7 @@
      * 抗锯齿又是创建期参数，改不了。于是"怎么调都是同一个高画质"。
      * 现在切档时：① 换画布重建渲染器（抗锯齿真正换掉）；② 太阳强度与阴影贴图尺寸换档；
      * ③ MazeView 就地换墙檐 / 粒子 / 阴影接收。三档在桌面上都立刻可见。 */
-    if (evt.key === 'quality' || evt.reset) {
+    if (evt.key === 'quality' || evt.key === 'perfMode' || evt.reset) {
       /* 只有"档位真的变了"才重建渲染器。
        * 原因：MG.Settings.set() 无论值有没有变都会广播（js/settings.js 的 setSetting 末尾
        * 无条件 emit），而「恢复默认」走的是 reset 广播 —— 不判断的话，重复点同一档画质、
@@ -1992,7 +2057,9 @@
         Game.mazeView.applyQuality(settings.quality);
       }
       // 阴影与画质同口径：低画质既不接收也不投射；切回中/高档时恢复
-      if (Game.mazeView && Game.mazeView.walls) {
+      if (Game.mazeView && typeof Game.mazeView.setWallShadow === 'function') {
+        Game.mazeView.setWallShadow(!!settings.shadows && settings.quality !== 'low');
+      } else if (Game.mazeView && Game.mazeView.walls) {
         var wallsShadow = !!settings.shadows && settings.quality !== 'low';
         Game.mazeView.walls.castShadow = wallsShadow;
         Game.mazeView.walls.receiveShadow = wallsShadow;
@@ -2029,6 +2096,22 @@
     // 「小地图显示全部金币」→ 强制下一次主循环立即重绘小地图，切换即时生效
     if (evt.key === 'minimapCoins') {
       lastMapDraw = 999;
+    }
+
+    /* 性能模式 / 视距裁剪（2026-11-15 性能三件套）：
+       · 视距裁剪的生效值 = viewCull || perfMode，统一由 applyViewCullToLevel() 现算；
+       · 小地图节流间隔在渲染循环里**现读设置**（mapDrawIntervalSec），
+         这里不缓存状态，切档时把 lastMapDraw 顶过阈值让它立刻按新间隔走一次；
+       · syncSettingsUI() 是为了让玩家"看得见当前值"（用户口径）：性能模式打开时
+         画质与阴影被级联改成 low / 关，设置面板的下拉与开关必须同步显示。
+       ⚠ 这里**绝不**再调 S.set('quality'/'shadows')：设置模块已经直接写好了生效字段，
+         再走一次 set 就会重入本函数（perfMode → quality → …），
+         注释里点名的"无限递归"风险就是这个；改成"直接应用"从结构上不可能递归。 */
+    if (evt.key === 'perfMode' || evt.key === 'viewCull' || evt.key === 'quality' ||
+        evt.key === 'shadows' || evt.reset) {
+      applyViewCullToLevel();
+      if (evt.key === 'perfMode' || evt.key === 'viewCull') lastMapDraw = 999;
+      if (MG.UI && MG.UI.syncSettingsUI) MG.UI.syncSettingsUI();
     }
   }
 

@@ -369,6 +369,11 @@
         return;
       }
       if (state !== 'playing') return;
+      /* 最大化地图开着时**不要重新锁定指针**（用户 2026-11-15 明确要求"关闭按钮始终可点"）：
+         指针一旦被锁，光标隐藏、点击不再落到 DOM 上，专用关闭按钮就点不到了。
+         代价（已与用户确认）：最大化期间鼠标不能再拖视角 —— 但 `V` / ESC / 关闭按钮都能收，
+         触屏设备本来就没有指针锁定，不受影响。 */
+      if (MG.UI && MG.UI.isMapFullOpen && MG.UI.isMapFullOpen()) return;
       if (!self.pointerLocked && !document.hidden) {
         self.requestPointerLock();
       }

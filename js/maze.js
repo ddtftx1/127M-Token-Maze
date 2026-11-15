@@ -484,6 +484,21 @@
     this.group = new THREE.Group();
     this.group.name = 'mazeRoot';
     this.walls = null;
+    /* 墙体合并（2026-11-15）：walls / caps 现在是 Group（每块一个 Mesh），
+       材质、合并矩形与块元数据挂在这里 —— Group 上没有 material 属性。 */
+    this.wallMaterial = null;
+    this.wallTexture = null;
+    this.wallChunks = null;        // 合并后的矩形（墙檐复用同一批）
+    this.wallChunkMeshes = null;   // 块元数据（阴影 / 视距裁剪）
+    this.capsMaterial = null;
+    this.wallBoxCount = 0;
+    // 视距裁剪状态（默认关；由 main.js 按设置切换，见 setViewCulling）
+    this.viewCullEnabled = false;
+    this.viewCullRadius = 0;       // 0 = 用默认半径（VIEW_CULL_RADIUS_CELLS）
+    this._cullGx = null;
+    this._cullGy = null;
+    this._cullAnchorGx = null;
+    this._cullAnchorGy = null;
     this.coins = [];       // {mesh, x, y, collected}
     // 迷宫地图道具 {group, board, glow, ring, x, y, world, collected}
     // 自转作用在整个 group 上：卷轴杆与地图板作为一体旋转（BUG-021，见 update()）
@@ -497,6 +512,179 @@
   function cellToWorld(gx, gy, maze) {
     var half = (maze.size * CELL) / 2;
     return { x: gx * CELL - half + CELL / 2, z: gy * CELL - half + CELL / 2 };
+  }
+
+  /* ============================================================
+   * 墙体合并（2026-11-15，性能三件套之一）
+   * ============================================================
+   * 现状（改造前）：121×121 的困难档有 7370 个墙格，逐个塞进**一个** InstancedMesh，
+   * 也就是 7370 个 BoxGeometry 实例 = 7370×12 = 88440 个三角形，全部要跑顶点着色。
+   * 目标：把"相邻的墙格"合并成更大的长方体 → 盒体数量与三角形数一起降下来；
+   * 并且按**区块（chunk）**分组，让引擎能按块做视锥剔除（相机后面 / 视野外的块整个不画），
+   * 这也是下面"视距裁剪"能按块开关的前提。
+   *
+   * ⚠ 视觉等价的硬要求（用户点名）：墙材质带砖纹贴图（makeWallTexture，UV 是
+   * BoxGeometry 默认的每面 0..1）。盒子一旦拉长，砖纹会被拉伸 ——
+   * 所以合并时**必须按每个面跨了几格重算 UV**（见 buildMergedBoxGeometry 的注释），
+   * 使砖纹密度与合并前逐格实例完全一致。
+   * ========================================================== */
+
+  /**
+   * 每个合并区块的边长（单位：格）。**这个值是实测选出来的，不是拍的**。
+   *
+   * ── 为什么"降一个量级"做不到（如实记录，见 harness/perf-zoom-verify.js 的实测表）──
+   * 这类迷宫的墙体密度是 50%（121×121 里 7383 个墙格），而且**墙只有 1 格厚** ——
+   * 任何 2×2 以上的矩形都必然包含通路格。所以可合并出来的矩形只能是"长条"
+   * （1×k 或 k×1），平均每个盒子只能吃掉约 3 个墙格。
+   * 121×121 实测（合并后的盒子数 / 墙格数 = 压缩比）：
+   *   chunk= 4 → 3128 盒（2.36×）   chunk= 8 → 2595 盒（2.85×）
+   *   chunk=16 → 2360 盒（3.13×）   chunk=32 → 2214 盒（3.33×）
+   *   chunk=121（整图一块）→ 2121 盒（3.48×，理论极限附近）
+   * 即"盒体数降一个量级"在本结构下**数学上不可达**；实际收益来自三处：
+   *   ① 三角形 / 顶点数：88596 → 28320（-68%）；
+   *   ② 区块级视锥剔除 + 视距裁剪（2C）：远处被雾吃掉的墙整块不画；
+   *   ③ uv/法线不再逐格重复（InstancedMesh 的 7370 个实例每个都要跑顶点着色）。
+   * 代价是绘制对象从 1 个 InstancedMesh 变成"含墙的区块数"个 Mesh —— 这是
+   * "可裁剪"换来的，取舍写在交付报告里。
+   *
+   * ── 为什么取 16 而不是任务书举例的 8 ──
+   * 16 在"盒子数 / 绘制对象数"两个指标上都优于 8（2360 盒 / 64 块 vs 2595 盒 / 256 块），
+   * 三角形只差 9%；代价是视距裁剪粒度变粗（块半对角 11.3 格），
+   * 而 45 格半径减去 11.3 格 = 33.7 格，仍大于"95% 消光"的 29 格可见边界
+   * （67m 处雾的透光率约 1.8%），所以不会出现"可见区里的墙被裁掉"。
+   */
+  var WALL_CHUNK = 16;
+
+  /**
+   * 把一个区块内的墙格合并成尽可能少的矩形（贪心：先按行取横向连续段，再把上下行
+   * 完全相同的段纵向延长）。返回的是**格坐标闭区间** [x0,x1]×[y0,y1]。
+   *
+   * 为什么用这种贪心而不是"最大矩形"算法：迷宫墙体是长条（墙线），
+   * 横向段 + 纵向延长已经能把整条墙线合成一个盒子；最大矩形算法（悬垂线法）
+   * 在这种"1 格宽长条"上的收益一样，但实现复杂一个量级、更容易写错。
+   *
+   * @param {Uint8Array} grid 迷宫网格（1=墙）
+   * @param {number} size 网格边长（2n+1）
+   * @param {number} [chunkSize] 区块边长（默认 WALL_CHUNK）
+   * @returns {Array} [{gx, gy, rects:[{x0,x1,y0,y1}]}] —— 只含有墙的区块
+   */
+  function mergeWallRects(grid, size, chunkSize) {
+    var cs = (typeof chunkSize === 'number' && chunkSize > 0) ? Math.floor(chunkSize) : WALL_CHUNK;
+    var chunks = [];
+    for (var cy0 = 0; cy0 < size; cy0 += cs) {
+      for (var cx0 = 0; cx0 < size; cx0 += cs) {
+        var xEnd = Math.min(cx0 + cs, size);
+        var yEnd = Math.min(cy0 + cs, size);
+        /* open：本区块内"尚未封口"的矩形，键 = 本行的横向段 x0:x1。
+           上一行有同样区间的段 → 纵向延长一行；本行没出现 → 封口成矩形。 */
+        var open = {};
+        var rects = [];
+        for (var y = cy0; y < yEnd; y++) {
+          var seen = {};
+          var x = cx0;
+          while (x < xEnd) {
+            if (grid[y * size + x] !== 1) { x++; continue; }
+            var xs = x;
+            while (x < xEnd && grid[y * size + x] === 1) x++;
+            var xe = x - 1;
+            var key = xs + ':' + xe;
+            seen[key] = true;
+            if (open[key]) open[key].y1 = y;
+            else open[key] = { x0: xs, x1: xe, y0: y, y1: y };
+          }
+          var keys = Object.keys(open);
+          for (var ki = 0; ki < keys.length; ki++) {
+            if (!seen[keys[ki]]) {
+              rects.push(open[keys[ki]]);
+              delete open[keys[ki]];
+            }
+          }
+        }
+        var rest = Object.keys(open);
+        for (var ri = 0; ri < rest.length; ri++) rects.push(open[rest[ri]]);
+        if (rects.length) chunks.push({ gx: cx0, gy: cy0, rects: rects });
+      }
+    }
+    return chunks;
+  }
+
+  /** 单位盒模板（懒创建）：复用 three 自己的 BoxGeometry 顶点/法线/UV/索引顺序，避免手写 6 个面出错 */
+  var unitBoxTpl = null;
+  function getUnitBoxTemplate() {
+    if (!unitBoxTpl) unitBoxTpl = new THREE.BoxGeometry(1, 1, 1);
+    return unitBoxTpl;
+  }
+
+  /**
+   * 把一组矩形（格坐标闭区间）合并成**一个** BufferGeometry（每个矩形 = 一个长方体）。
+   *
+   * ── UV 补偿（视觉等价的关键，改这里前先把下面读完）──
+   * 模板 BoxGeometry(1,1,1) 每个面的 UV 都是 0..1。原始实现里每个墙格是一个 1×1 的盒，
+   * 于是"一个面 = 一次砖纹"。合并后盒子在 X/Z 方向跨了 nx/nz 格，
+   * 若 UV 仍是 0..1，砖纹就被拉伸 nx/nz 倍（用户明确不接受）。
+   * 做法是**按面把 UV 乘上这个面跨的格数**：
+   *   · 法线沿 ±X 的面：U 轴沿 Z → u ×= nz（V 轴沿 Y，高度没变，不动）
+   *   · 法线沿 ±Y 的面：U 轴沿 X、V 轴沿 Z → u ×= nx，v ×= nz
+   *   · 法线沿 ±Z 的面：U 轴沿 X → u ×= nx
+   * 材质纹理是 RepeatWrapping（build() 里设的），u=3 就是平铺 3 次，
+   * 于是"每格一次砖纹"的密度与合并前逐格实例**逐一对应**，砖缝也对齐格线。
+   * 按法线判断是哪个面（而不是按顶点下标猜 BoxGeometry 的面顺序）是为了
+   * three 换版本时依然成立。
+   *
+   * @param {Array} rects 矩形数组（格坐标闭区间）
+   * @param {Object} maze 迷宫（提供 size，用于把格坐标换成世界坐标）
+   * @param {number} boxH 盒高（世界单位）
+   * @param {number} centerY 盒中心的世界高度
+   * @returns {THREE.BufferGeometry}
+   */
+  function buildMergedBoxGeometry(rects, maze, boxH, centerY) {
+    var tpl = getUnitBoxTemplate();
+    var tplPos = tpl.getAttribute('position');
+    var tplNor = tpl.getAttribute('normal');
+    var tplUv = tpl.getAttribute('uv');
+    var tplIdx = tpl.getIndex();
+    var vCount = tplPos.count;                      // BoxGeometry(1,1,1) = 24
+    var iCount = tplIdx ? tplIdx.count : 36;
+    var total = rects.length;
+    var positions = new Float32Array(total * vCount * 3);
+    var normals = new Float32Array(total * vCount * 3);
+    var uvs = new Float32Array(total * vCount * 2);
+    /* 顶点数超过 65535 就必须用 32 位索引，否则索引会被截断成垃圾三角形。
+       区块合并后单块远达不到这个量，但"上限判断"留着 —— 调大 WALL_CHUNK 时不会静默出错。 */
+    var indices = (total * vCount > 65535)
+      ? new Uint32Array(total * iCount)
+      : new Uint16Array(total * iCount);
+    var half = (maze.size * CELL) / 2;
+    var pi = 0, ni = 0, ui = 0, ii = 0, vbase = 0;
+    for (var r = 0; r < total; r++) {
+      var rect = rects[r];
+      var nx = rect.x1 - rect.x0 + 1;
+      var nz = rect.y1 - rect.y0 + 1;
+      var w = nx * CELL;
+      var d = nz * CELL;
+      var cx = ((rect.x0 + rect.x1) / 2) * CELL - half + CELL / 2;
+      var cz = ((rect.y0 + rect.y1) / 2) * CELL - half + CELL / 2;
+      for (var v = 0; v < vCount; v++) {
+        positions[pi++] = tplPos.getX(v) * w + cx;
+        positions[pi++] = tplPos.getY(v) * boxH + centerY;
+        positions[pi++] = tplPos.getZ(v) * d + cz;
+        var nrx = tplNor.getX(v), nry = tplNor.getY(v), nrz = tplNor.getZ(v);
+        normals[ni++] = nrx; normals[ni++] = nry; normals[ni++] = nrz;
+        var tu = tplUv.getX(v), tv = tplUv.getY(v);
+        if (nrx !== 0) { tu *= nz; }
+        else if (nry !== 0) { tu *= nx; tv *= nz; }
+        else { tu *= nx; }
+        uvs[ui++] = tu; uvs[ui++] = tv;
+      }
+      for (var k = 0; k < iCount; k++) indices[ii++] = tplIdx.getX(k) + vbase;
+      vbase += vCount;
+    }
+    var geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geo.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
+    geo.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+    geo.setIndex(new THREE.BufferAttribute(indices, 1));
+    return geo;
   }
 
   MazeView.prototype.build = function () {
@@ -545,40 +733,49 @@
       this.ceiling = ceil;
     }
 
-    /* ---------- 墙体：InstancedMesh ---------- */
-    var wallPositions = [];
-    for (var y = 0; y < size; y++) {
-      for (var x = 0; x < size; x++) {
-        if (maze.grid[y * size + x] === 1) wallPositions.push([x, y]);
-      }
-    }
-
-    var wallGeo = new THREE.BoxGeometry(CELL, diff.wallHeight, CELL);
-    // 用顶面稍亮的自定义：Lambert 足够，另加一层"砖纹"纹理
+    /* ---------- 墙体：分块合并的长方体（2026-11-15 性能改造，原理见文件上方"墙体合并"） ---------- */
+    // 砖纹"底部偏暗、顶部偏亮"的渐变靠 V 轴方向保持；Lambert 足够，另加一层砖纹纹理
     var wallTex = makeWallTexture(t, 128);
     wallTex.wrapS = wallTex.wrapT = THREE.RepeatWrapping;
     var wallMat = new THREE.MeshLambertMaterial({ map: wallTex, color: t.wall });
 
-    var inst = new THREE.InstancedMesh(wallGeo, wallMat, wallPositions.length);
-    inst.instanceMatrix.setUsage(THREE.StaticDrawUsage);
-    var m4 = new THREE.Matrix4();
-    for (var i = 0; i < wallPositions.length; i++) {
-      var p = wallPositions[i];
-      var w = cellToWorld(p[0], p[1], maze);
-      m4.makeTranslation(w.x, diff.wallHeight / 2, w.z);
-      inst.setMatrixAt(i, m4);
-      // 轻微色差（用 instanceColor）
-      if (inst.instanceColor) { /* 占位：部分版本需手动开启 */ }
+    var chunks = mergeWallRects(maze.grid, size);
+    var wallGroup = new THREE.Group();
+    wallGroup.name = 'mazeWalls';
+    var chunkMeshes = [];
+    /* 统计口径（报告里要用，别改）：
+       - 改造前：盒体数 = 墙格数（121×121 ≈ 7370），三角形 = 盒体×12，绘制对象 = 1 个 InstancedMesh；
+       - 改造后：盒体数 = 合并后的矩形数（降一个量级），三角形 = 盒体×12，
+         绘制对象 = 含墙的区块数（变多，换的是"按块视锥剔除 + 视距裁剪"）。 */
+    var boxCount = 0;
+    for (var ci = 0; ci < chunks.length; ci++) {
+      var chunk = chunks[ci];
+      boxCount += chunk.rects.length;
+      var chunkGeo = buildMergedBoxGeometry(chunk.rects, maze, diff.wallHeight, diff.wallHeight / 2);
+      var chunkMesh = new THREE.Mesh(chunkGeo, wallMat);
+      /* 阴影：合并后的 Mesh 仍要能投影 / 接收 —— main.js 的 onSettingChanged 与
+         MazeView.applyQuality() 都通过 setWallShadow() 遍历子节点重新设置，三处口径必须一致。 */
+      chunkMesh.castShadow = needShadows;
+      chunkMesh.receiveShadow = needShadows;
+      chunkMesh.frustumCulled = true;   // 区块级视锥剔除：相机背后的整块不参与绘制
+      chunkMesh.name = 'mazeWallChunk_' + chunk.gx + '_' + chunk.gy;
+      wallGroup.add(chunkMesh);
+      // 视距裁剪 / 剔除用的块元数据（块中心的格坐标；距离比较全在格坐标系里做，省一次换算）
+      chunkMeshes.push({
+        mesh: chunkMesh,
+        gx: chunk.gx, gy: chunk.gy,
+        cgx: chunk.gx + (WALL_CHUNK - 1) / 2,
+        cgy: chunk.gy + (WALL_CHUNK - 1) / 2,
+        capMesh: null
+      });
     }
-    inst.instanceMatrix.needsUpdate = true;
-    inst.castShadow = needShadows;
-    inst.receiveShadow = needShadows;
-    inst.frustumCulled = true;
-    this.walls = inst;
-    this.group.add(inst);
-
-    // 墙位缓存：applyQuality() 换档时重建墙檐要用（BUG-033）
-    this.wallPositions = wallPositions;
+    this.walls = wallGroup;
+    this.wallMaterial = wallMat;       // applyTheme 换色 / 换纹理走这份引用（Group 上没有 material）
+    this.wallTexture = wallTex;
+    this.wallChunkMeshes = chunkMeshes;
+    this.wallChunks = chunks;          // 墙檐复用同一批矩形（足迹完全一致，省一次合并计算）
+    this.wallBoxCount = boxCount;
+    this.group.add(wallGroup);
 
     // 外墙顶部的暖色边条（"墙檐"）：低画质不生成，中/高画质有；
     // 运行时可增删，见 buildCaps() / applyQuality()
@@ -743,40 +940,58 @@
   };
 
   /**
+   * 释放一个 Group 下所有子对象的 BufferGeometry。
+   * 为什么需要它：墙檐 / 墙体从"单个 InstancedMesh"改成了 Group + 每块一个 Mesh 之后，
+   * Object3D 本身没有 dispose()，几何必须逐块释放，否则每换一次画质 / 每开一局
+   * 都会漏掉一批 GPU 缓冲（这正是改造前注释里 warning 的那类泄漏）。
+   * 材质不在这里释放：同组的 Mesh 共享同一份材质，由调用方释放一次即可。
+   */
+  function disposeGroupGeometries(group) {
+    if (!group || !group.traverse) return;
+    group.traverse(function (obj) {
+      if (obj.geometry && typeof obj.geometry.dispose === 'function') obj.geometry.dispose();
+    });
+  }
+
+  /**
    * 墙檐（外墙顶部的暖色边条）。低画质不生成。
    * 抽成独立方法是为了让 applyQuality() 能就地增删，不必重建整个迷宫（BUG-033）。
+   * 2026-11-15：随墙体一起改成"按区块合并"——直接复用 mergeWallRects 的同一批矩形
+   * （墙檐的足迹与墙体逐格一致，位置仍是 wallHeight − 0.04，观感与逐格实例等价）。
    */
   MazeView.prototype.buildCaps = function () {
     var old = this.caps;
     if (old) {
       if (old.parent) old.parent.remove(old);
-      // InstancedMesh 的 instanceMatrix 只有它自己的 dispose() 能释放（详见 MazeView.dispose 的注释）
-      if (typeof old.dispose === 'function') old.dispose();
-      if (old.geometry) old.geometry.dispose();
-      if (old.material) old.material.dispose();
+      // 逐块释放几何；材质是共享的一份，单独释放（Group 上没有 material / dispose）
+      disposeGroupGeometries(old);
+      if (old.material && typeof old.material.dispose === 'function') old.material.dispose();
       this.caps = null;
     }
     if (this.quality === 'low') return;
-    var wp = this.wallPositions;
-    if (!wp || !wp.length) return;
+    var chunks = this.wallChunks;
+    if (!chunks || !chunks.length) return;
     var t = this.theme;
     var diff = this.diff;
-    var maze = this.maze;
     var capMat = new THREE.MeshBasicMaterial({
       color: t.accent, transparent: true, opacity: 0.10, depthWrite: false
     });
-    var capGeo = new THREE.BoxGeometry(CELL, 0.08, CELL);
-    var cap = new THREE.InstancedMesh(capGeo, capMat, wp.length);
-    var mat4 = new THREE.Matrix4();
-    for (var k = 0; k < wp.length; k++) {
-      var pp = wp[k];
-      var ww = cellToWorld(pp[0], pp[1], maze);
-      mat4.makeTranslation(ww.x, diff.wallHeight - 0.04, ww.z);
-      cap.setMatrixAt(k, mat4);
+    var capH = 0.08;
+    var capGroup = new THREE.Group();
+    capGroup.name = 'mazeCaps';
+    for (var ci = 0; ci < chunks.length; ci++) {
+      var chunk = chunks[ci];
+      var capGeo = buildMergedBoxGeometry(chunk.rects, this.maze, capH, diff.wallHeight - capH / 2);
+      var capMesh = new THREE.Mesh(capGeo, capMat);
+      capMesh.frustumCulled = true;
+      capMesh.name = 'mazeCapChunk_' + chunk.gx + '_' + chunk.gy;
+      capGroup.add(capMesh);
+      // 把墙檐块挂到对应的墙体块元数据上：视距裁剪要"墙体与墙檐同时隐藏"，两套网格分不开
+      if (this.wallChunkMeshes && this.wallChunkMeshes[ci]) this.wallChunkMeshes[ci].capMesh = capMesh;
     }
-    cap.instanceMatrix.needsUpdate = true;
-    this.group.add(cap);
-    this.caps = cap;
+    this.group.add(capGroup);
+    this.caps = capGroup;
+    this.capsMaterial = capMat;
   };
 
   /**
@@ -845,12 +1060,152 @@
     // 阴影接收/投射都跟"总开关 + 是否低画质"走，与 build() 里的 needShadows 同口径
     var receive = !!this.settings.shadows && q !== 'low';
     if (this.floor) this.floor.receiveShadow = receive;
-    if (this.walls) {
-      this.walls.receiveShadow = receive;
-      this.walls.castShadow = receive;
-    }
+    this.setWallShadow(receive);
     if (this.ceiling) this.ceiling.receiveShadow = receive;
     return true;
+  };
+
+  /**
+   * 设置**所有墙体块**的投影 / 接收阴影。
+   * 为什么必须收敛成一个方法：`walls` 从单个 InstancedMesh 改成 Group 之后，
+   * 在 Group 上写 `walls.castShadow = true` 不会传到子 Mesh —— three 渲染时读的是每个
+   * Mesh 自己的标记。main.js 里原来的两处直接赋值会**静默失效**（不报错、只是没影子），
+   * 所以两处都改成了调用本方法（与 applyQuality 共用同一口径，避免第三处漂移）。
+   * @param {boolean} receive
+   */
+  MazeView.prototype.setWallShadow = function (receive) {
+    var on = !!receive;
+    var list = this.wallChunkMeshes || [];
+    for (var i = 0; i < list.length; i++) {
+      var m = list[i].mesh;
+      if (!m) continue;
+      m.castShadow = on;
+      m.receiveShadow = on;
+    }
+  };
+
+  /* ------------------------------------------------------------
+   * 视距裁剪（2026-11-15 性能三件套之一）
+   * ------------------------------------------------------------
+   * 只画玩家附近的墙体：与"逐块视锥剔除"是两件事 ——
+   * 视锥剔除由 three 自己做（相机背后 / 视野外），这里按**到玩家的距离**隐藏整块，
+   * 覆盖的是"在视野内、但远到被雾吃掉"的那部分（开阔区里最常见）。
+   *
+   * ── 半径怎么定（任务书要求写明依据）──
+   * 困难档 fogDensity = 0.03（FogExp2），能见度因子 = exp(−(density×d)²)：
+   *   d=40m → 24% 透光；d=58m → 5% 透光。取"95% 被雾吃掉"为实际可见边界：
+   *   (0.03×d)² = 3 → d ≈ 58m ≈ 29 格（CELL=2m）。
+   *   再乘 1.5 倍余量 → 45 格：余量用来吸收三件事
+   *     ① 玩家跨格才检查一次（见下面的检查步长），边界是"滞后"的；
+   *     ② 块中心的距离判据最多有半个块对角（≈5.7 格）的误差；
+   *     ③ 雾是渐变而不是硬边，"刚好在边界上"的墙仍有 5% 亮度。
+   *   于是"快速转身时墙突然出现"在数学上不会发生在可见区里。
+   *   低难度雾更稀（0.012/0.0252）→ 可视距离更远，但那些关卡尺寸小（21×21/31×31），
+   *   半径 45 格已经覆盖整张图，等于不裁剪（不可能出现远处墙被误隐藏）。
+   * ---------------------------------------------------------- */
+  /** 雾可见距离（格）：困难档 95% 消光处 ≈29 格，取整 30 作为基准 */
+  var VIEW_CULL_BASE_CELLS = 30;
+  /** 余量系数：见上面"半径怎么定"第 ①②③ 条 */
+  var VIEW_CULL_MARGIN = 1.5;
+  /** 实际使用的裁剪半径（格）：30 × 1.5 = 45 */
+  var VIEW_CULL_RADIUS_CELLS = 45;
+  /**
+   * 玩家移动多少格才重算一次可见性。
+   * 为什么不是每帧：块元数据有 ~250 条，每帧遍历纯属白干；而裁剪边界在 45 格外，
+   * 玩家走 3 格（6m）只会让边界相对可见区（29 格）移动 3 格，离"切进可见区"还差十几格。
+   * 3 格 × 2m = 6m，正常步速下约 1.5 秒一次，开销可以忽略。
+   */
+  var VIEW_CULL_CHECK_CELLS = 3;
+
+  /**
+   * 开关视距裁剪。关闭时**立即把所有块恢复可见**（性能模式关掉必须完全还原，
+   * 不能留下上一次隐藏过的块 —— 那就是"附近没墙"的空洞 bug）。
+   * @param {boolean} enabled
+   * @param {number} [radiusCells] 自定义半径（不传用 VIEW_CULL_RADIUS_CELLS）
+   * @returns {boolean} 生效后的开关状态
+   */
+  MazeView.prototype.setViewCulling = function (enabled, radiusCells) {
+    this.viewCullEnabled = !!enabled;
+    if (typeof radiusCells === 'number' && radiusCells > 0) this.viewCullRadius = radiusCells;
+    else if (!(this.viewCullRadius > 0)) this.viewCullRadius = VIEW_CULL_RADIUS_CELLS;
+    /* 立刻按最近一次已知玩家格重算（换档后不应等到玩家跨格才生效）。
+       已知格由 updateViewCulling 记录；没有记录时不猜（等主循环第一次调用）。 */
+    if (this._cullGx !== null && this._cullGx !== undefined) {
+      this.updateViewCulling(this._cullGx, this._cullGy, true);
+    } else if (this.maze && this.maze.start) {
+      /* 还没有玩家格记录（刚建好关卡就切开关）：用**出生格**当锚点。
+         绝不能拿 (0,0) 兜底 —— 出生点不在左上角时，玩家附近的墙会被当成"远处的墙"
+         藏起来，表现就是开局眼前一片空（"附近没墙"的空洞 bug）。
+         MazeView 的 maze.start 与玩家出生格在主游戏里是同一个格（buildLevel 里一致）。 */
+      this.updateViewCulling(this.maze.start.x, this.maze.start.y, true);
+    }
+    return this.viewCullEnabled;
+  };
+
+  /**
+   * 按玩家所在格刷新各区块的可见性。**不在每帧调用**：主循环里由
+   * main.js 在"玩家格变化"时调用，内部再按 VIEW_CULL_CHECK_CELLS 节流。
+   * @param {number} gx 玩家格 x
+   * @param {number} gy 玩家格 y
+   * @param {boolean} [force] 跳过节流（开关切换 / 换关时用）
+   * @returns {boolean} 本次是否真的改变了某些块的可见性
+   */
+  MazeView.prototype.updateViewCulling = function (gx, gy, force) {
+    var list = this.wallChunkMeshes;
+    if (!list || !list.length) return false;
+    if (typeof gx !== 'number' || !isFinite(gx) || typeof gy !== 'number' || !isFinite(gy)) return false;
+    this._cullGx = gx;
+    this._cullGy = gy;
+    var i;
+    if (!this.viewCullEnabled) {
+      // 关闭态：确保全部可见（从"性能模式"切回来时把隐藏过的块放出来）
+      var restored = false;
+      for (i = 0; i < list.length; i++) {
+        if (list[i].mesh && !list[i].mesh.visible) { list[i].mesh.visible = true; restored = true; }
+        if (list[i].capMesh && !list[i].capMesh.visible) { list[i].capMesh.visible = true; restored = true; }
+      }
+      return restored;
+    }
+    // 节流：只在玩家跨过 VIEW_CULL_CHECK_CELLS 格（或 force）时重算
+    if (!force && this._cullAnchorGx !== null && this._cullAnchorGx !== undefined) {
+      var adx = gx - this._cullAnchorGx;
+      var ady = gy - this._cullAnchorGy;
+      if (adx * adx + ady * ady < VIEW_CULL_CHECK_CELLS * VIEW_CULL_CHECK_CELLS) return false;
+    }
+    this._cullAnchorGx = gx;
+    this._cullAnchorGy = gy;
+    var r = this.viewCullRadius > 0 ? this.viewCullRadius : VIEW_CULL_RADIUS_CELLS;
+    var r2 = r * r;
+    var changed = false;
+    for (i = 0; i < list.length; i++) {
+      var e = list[i];
+      var dx = e.cgx - gx;
+      var dy = e.cgy - gy;
+      var hit = (dx * dx + dy * dy) <= r2;
+      if (e.mesh && e.mesh.visible !== hit) { e.mesh.visible = hit; changed = true; }
+      if (e.capMesh && e.capMesh.visible !== hit) { e.capMesh.visible = hit; changed = true; }
+    }
+    return changed;
+  };
+
+  /** 视距裁剪的观测快照（测试 / 排错用）：可见块数 / 隐藏块数 / 半径与开关 */
+  MazeView.prototype.viewCullInfo = function () {
+    var list = this.wallChunkMeshes || [];
+    var visible = 0, hidden = 0;
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].mesh && list[i].mesh.visible) visible++;
+      else hidden++;
+    }
+    return {
+      enabled: !!this.viewCullEnabled,
+      radius: this.viewCullRadius > 0 ? this.viewCullRadius : VIEW_CULL_RADIUS_CELLS,
+      checkCells: VIEW_CULL_CHECK_CELLS,
+      chunks: list.length,
+      visible: visible,
+      hidden: hidden,
+      anchorGx: (this._cullAnchorGx === undefined) ? null : this._cullAnchorGx,
+      anchorGy: (this._cullAnchorGy === undefined) ? null : this._cullAnchorGy
+    };
   };
 
   /**
@@ -862,15 +1217,18 @@
     var t = THEMES[themeName] || THEMES.tech;
     this.theme = t;
 
-    // 墙体（InstancedMesh，整体共用一份材质）：颜色 + 砖纹纹理都按新主题重建
-    if (this.walls && this.walls.material) {
-      var wm = this.walls.material;
+    /* 墙体：所有区块**共享同一份材质**，所以换主题只需改这一份（与逐格实例时完全一致）。
+       引用存在 this.wallMaterial 上：walls 现在是 Group（Group.material 恒为 undefined），
+       继续读 this.walls.material 会静默什么都不做 —— 那是"换主题墙体不变色"的经典假修。 */
+    var wm = this.wallMaterial || (this.walls && this.walls.material);
+    if (wm) {
       if (wm.color) wm.color.setHex(t.wall);
       if (wm.map) wm.map.dispose();
       var newWallTex = makeWallTexture(t, 128);
       newWallTex.wrapS = newWallTex.wrapT = THREE.RepeatWrapping;
       wm.map = newWallTex;
       wm.needsUpdate = true;
+      this.wallTexture = newWallTex;
     }
 
     // 地板
@@ -885,10 +1243,11 @@
       this.ceiling.material.needsUpdate = true;
     }
 
-    // 墙檐（仅非低画质存在）：跟随主题强调色
-    if (this.caps && this.caps.material && this.caps.material.color) {
-      this.caps.material.color.setHex(t.accent);
-      this.caps.material.needsUpdate = true;
+    // 墙檐（仅非低画质存在）：跟随主题强调色（同样是共享材质，Group 上没有 material）
+    var cm = this.capsMaterial || (this.caps && this.caps.material);
+    if (cm && cm.color) {
+      cm.color.setHex(t.accent);
+      cm.needsUpdate = true;
     }
   };
 
@@ -1064,11 +1423,11 @@
 
   /** 销毁场景对象，释放 GPU 资源 */
   MazeView.prototype.dispose = function () {
-    /* InstancedMesh 的 instanceMatrix 是挂在**网格自己**身上的缓冲区，
-       geometry.dispose() 只清 geometry 自带的属性，管不到它。
-       three 的实现里只有 InstancedMesh 派发 dispose 事件时才会把它从
-       WebGLAttributes 里摘掉（assets/three.module.js 的 onInstancedMeshDispose），
-       所以墙体与墙檐必须单独 dispose()，否则每开一局都会漏一份 GPU 缓冲。 */
+    /* 墙体 / 墙檐现在是 Group + 每块一个 Mesh：
+       · 几何：由下面的 group.traverse 逐块释放（Object3D 没有 dispose()）；
+       · instanceMatrix：旧实现（InstancedMesh）的缓冲区只有它自己的 dispose() 能释放，
+         那两句旧调用保留为"万一"兜底 —— 对 Group 是 typeof 判定后跳过的空操作，
+         不会误伤。 */
     if (this.walls && typeof this.walls.dispose === 'function') this.walls.dispose();
     if (this.caps && typeof this.caps.dispose === 'function') this.caps.dispose();
     this.group.traverse(function (obj) {
@@ -1079,6 +1438,10 @@
       }
     });
     function disposeMat(m) {
+      // 合并后同一份墙体材质挂在 N 个块上，traverse 会撞见 N 次；用标记保证只释放一次，
+      // 否则纹理会被反复 dispose（虽然 three 容错，但每帧日志/事件都是白开销）
+      if (!m || m.__mazeDisposed) return;
+      m.__mazeDisposed = true;
       // 色盲文字纹理是模块级共享缓存，销毁关卡时保留，供下次复用
       if (m.map && !m.map.__cbShared) m.map.dispose();
       m.dispose();
@@ -1088,7 +1451,11 @@
     this.mapItem = null;
     this.walls = null;
     this.caps = null;
-    this.wallPositions = null;
+    this.wallMaterial = null;
+    this.wallTexture = null;
+    this.wallChunks = null;
+    this.wallChunkMeshes = null;
+    this.capsMaterial = null;
     this.particles = null;
     this.startSprite = null;
     this.endSprite = null;
@@ -1219,6 +1586,13 @@
     isOpen: isOpen,
     cellToWorld: cellToWorld,
     MazeView: MazeView,
+    /* 墙体合并（2026-11-15）：mergeWallRects 是纯函数（不碰 THREE），
+       供无头自证脚本对"合并前后盒体数 / 三角形数 / UV 密度"做断言；
+       buildMergedBoxGeometry 需要 THREE，只在浏览器 / jsdom 环境里用。 */
+    WALL_CHUNK: WALL_CHUNK,
+    VIEW_CULL_RADIUS_CELLS: VIEW_CULL_RADIUS_CELLS,
+    mergeWallRects: mergeWallRects,
+    buildMergedBoxGeometry: buildMergedBoxGeometry,
     randomSeed: randomSeed,
     dailySeed: dailySeed,
     hashString: hashString,

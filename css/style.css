@@ -695,6 +695,18 @@ html, body {
   width: 0;
   height: 0;
   pointer-events: auto;    /* 地图本体可以点（再点一次 = 收起） */
+  /* ── 缩放 / 拖动平移（用户 2026-11-15 口径 ②③）──
+     touch-action:none 必须写在**真正接住 PointerEvent 的这个元素**上：
+     双指捏合时浏览器默认会把它当成"页面缩放"（Chrome 的 pinch-zoom 与
+     iOS 的 gesture 事件），事件还没到 JS 就被浏览器吃掉，表现为"捏不动"。
+     .map-full 上那份是给"留白穿透"用的，两层都写才在某层被单独覆盖时不出洞。
+     user-select:none 是为了鼠标拖动时不要顺手把页面文字/画布选成蓝色。
+     cursor:grab 只是提示"这张图能拖"，指针锁定在最大化期间已被 input.js 主动退出，
+     所以这个光标真的能被玩家看到（见 input.js 的 onClick 分支注释）。 */
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+  cursor: grab;
 }
 
 #map-full-canvas {
@@ -718,6 +730,28 @@ html, body {
   z-index: 1;
   font-size: 17px;
   border-color: rgba(120, 190, 255, 0.4);
+  /* 关闭按钮在可拖动的地图本体内部：覆盖父级的 cursor:grab，否则看着像"能拖"却点得着 */
+  cursor: pointer;
+}
+
+/* 缩放倍数指示（用户 2026-11-15 口径 ④）：贴地图左下角。
+   ⚠ pointer-events:none 是硬要求 —— 它压在地图内容上，吃指针就意味着
+     "左下角那一块拖不动、捏不动"，而这种缺陷在真机上很难被说清。
+   半透明深底 + 描边是为了在任何主题 / 任何地图底色上都读得出来。 */
+.map-full-zoom {
+  position: absolute;
+  left: 10px;
+  bottom: 10px;
+  z-index: 1;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;   /* 数字等宽：倍数跳动时标签宽度不抖 */
+  line-height: 1.5;
+  color: rgba(210, 235, 255, 0.92);
+  background: rgba(6, 10, 18, 0.62);
+  border: 1px solid rgba(120, 190, 255, 0.28);
+  pointer-events: none;
 }
 
 /* 虚拟摇杆（左下） */

@@ -48,6 +48,25 @@
   var mapCacheCanvas = null;
   var mapCacheCtx = null;
   var mapCacheDpr = 1;
+  /**
+   * 主画布的像素比（与 mapCacheDpr 是**两个**概念，别再合回一个 —— 2026-11-15 缩放改造）：
+   *   · HUD 小地图：两者恒等（缓存与主画布同分辨率，与改造前逐像素一致）；
+   *   · 最大化地图：主画布仍按 dpr（上限 1.5），而离屏静态缓存可以在放大时提到更高
+   *     （上限 2，见 mapFullCacheDprFor 的取舍），否则 8× 时整张 1× 缓存被硬拉，
+   *     砖缝与网格糊成一片。
+   * 它只是"当前渲染目标"的一部分状态：由 withMapFullTarget() 成对切换 / 还原。
+   */
+  var mapViewDpr = 1;
+  /**
+   * 当前渲染目标的"纯绘制变换"（缩放 + 平移，单位都是**逻辑像素**）。
+   * 语义：屏幕坐标 = 地图坐标 × zoom + pan；HUD 小地图恒为 1 / 0 / 0。
+   * 为什么做成"纯绘制变换"：它只参与 drawMinimap 的 setTransform，
+   * 既不碰 player.explored，也不碰任何信息口径 —— 放大只看得到本来就已经画出来的
+   * 已探索区域，**不可能泄露未探索区域**（这一点由"未探索格根本不进静态缓存"保证）。
+   */
+  var mapViewZoom = 1;
+  var mapViewPanX = 0;
+  var mapViewPanY = 0;
   /** 缓存有效性标记：置 false 后下一次 drawMinimap 会重绘缓存 */
   var mapCacheDirty = true;
   /** 上次重绘缓存时的探索标记数量（变化说明新区域被探索 —— 静态层唯一的"内容变化"来源） */
@@ -217,11 +236,15 @@
       'compass-arrow', 'compass-dist', 'minimap', 'minimap-lock', 'minimap-lock-hint',
       // 最大化地图（M2/M3）：与 #hud 平级的独立层 + 小地图外框（点它 = 打开最大化）
       'minimap-wrap', 'map-full', 'map-full-inner', 'map-full-canvas', 'btn-map-full-close',
+      'map-full-zoom',
       'joystick', 'joystick-knob', 'btn-items', 'btn-cancel-path', 'toast',
       'pause-menu', 'btn-resume', 'btn-restart', 'btn-settings-pause', 'btn-menu',
       'settings-panel', 'set-fov', 'val-fov', 'set-sensitivity', 'val-sensitivity',
       'set-invert-yaw', 'set-invert-pitch', 'set-speed', 'val-speed',
-      'set-quality-select', 'set-shadows', 'set-fog', 'set-minimap-toggle', 'set-minimap-state',
+      'set-quality-select', 'set-shadows', 'set-fog',
+      // 性能三件套（2026-11-15）：漏在这里 = bindSwitch/setCheck 静默失效（el 缓存是唯一入口）
+      'set-perf-mode', 'set-view-cull',
+      'set-minimap-toggle', 'set-minimap-state',
       'set-minimap-coins', 'set-minimap-size', 'set-minimap-size-state',
       'set-theme-select', 'set-colorblind', 'set-volume', 'val-volume', 'set-sfx', 'set-ghost-select',
       'btn-settings-reset', 'btn-settings-back',
@@ -1403,6 +1426,12 @@
     bindSwitch('set-minimap-coins', 'minimapCoins');
     bindSwitch('set-colorblind', 'colorblind');
     bindSwitch('set-sfx', 'sfx');
+    /* 性能三件套（2026-11-15）：两个普通布尔开关。
+       性能模式的级联（quality→low / shadows→false）在 js/settings.js 的 setSetting 里完成，
+       设置面板里的画质下拉与阴影开关由 main.js 的 onSettingChanged 调 syncSettingsUI()
+       同步显示 —— 这里只负责把开关值写进设置，不重复实现级联（两处实现必然漂移）。 */
+    bindSwitch('set-perf-mode', 'perfMode');
+    bindSwitch('set-view-cull', 'viewCull');
 
     // 下拉框
     bindSelect('set-quality-select', 'quality');
@@ -1478,6 +1507,9 @@
     setCheck('set-minimap-coins', s.minimapCoins);
     setCheck('set-colorblind', s.colorblind);
     setCheck('set-sfx', s.sfx);
+    // 性能三件套（2026-11-15）：开关值直接反映设置；画质/阴影被级联改动时也靠这里同步显示
+    setCheck('set-perf-mode', s.perfMode);
+    setCheck('set-view-cull', s.viewCull);
 
     setValue('set-quality-select', s.quality);
     setValue('set-minimap-size', s.minimapSize || 'auto');
@@ -1887,14 +1919,56 @@
       mapCacheExploredCount = exploredCount;
     }
 
-    /* ---------- 3) 缓存整张贴到主画布（一次 drawImage） ---------- */
+    /* ---------- 3) 缓存贴到主画布 ---------- */
+    /* 先算"当前是否处于缩放/平移视图"。HUD 小地图恒为 false（mapViewZoom 永远是 1、
+       pan 永远是 0），所以下面那条分支与改造前**逐字节等价** —— 这是刻意的：
+       既有那条路径已被一整套断言钉死（bug069-verify.js 会数 drawImage 的调用形态），
+       新功能不该去动它。 */
+    var viewZoomed = (mapViewZoom !== 1 || mapViewPanX !== 0 || mapViewPanY !== 0);
     mapCtx.setTransform(1, 0, 0, 1, 0, 0);
     mapCtx.clearRect(0, 0, mapCacheCanvas.width, mapCacheCanvas.height);
     if (mapCacheCanvas) {
-      mapCtx.drawImage(mapCacheCanvas, 0, 0);
+      if (!viewZoomed) {
+        mapCtx.drawImage(mapCacheCanvas, 0, 0);
+      } else {
+        /* 放大时**不能**"整张 drawImage 之后靠变换缩放"：8× 等于让 GPU 去采样
+           64 倍面积的像素，而其中 63/64 落在画布外（白烧填充率，正是手机发烫的来源）。
+           改为只取"当前可见的那一小块"源矩形贴上去 —— 采样面积与屏幕像素同量级。
+           源矩形按缓存像素比换算、目标矩形按缩放后的逻辑坐标给，两边比例恰好是
+           cacheDpr/zoom，所以清晰度与"整张贴再缩放"完全一致（没有任何画质损失）。
+           边界钳到 [0,size]，且 x1>x0 才画：平移被 clampMapFullView() 限制在地图内，
+           正常不会出现空矩形，这里只是兜住"视口比地图还大"之类的极端数值。 */
+        var sizeV = mapSize;
+        var sx0 = (0 - mapViewPanX) / mapViewZoom;
+        var sy0 = (0 - mapViewPanY) / mapViewZoom;
+        var sx1 = (sizeV - mapViewPanX) / mapViewZoom;
+        var sy1 = (sizeV - mapViewPanY) / mapViewZoom;
+        if (sx0 < 0) sx0 = 0;
+        if (sy0 < 0) sy0 = 0;
+        if (sx1 > sizeV) sx1 = sizeV;
+        if (sy1 > sizeV) sy1 = sizeV;
+        if (sx1 > sx0 && sy1 > sy0) {
+          mapCtx.setTransform(mapViewDpr, 0, 0, mapViewDpr, 0, 0);
+          mapCtx.drawImage(
+            mapCacheCanvas,
+            sx0 * mapCacheDpr, sy0 * mapCacheDpr, (sx1 - sx0) * mapCacheDpr, (sy1 - sy0) * mapCacheDpr,
+            sx0 * mapViewZoom + mapViewPanX, sy0 * mapViewZoom + mapViewPanY,
+            (sx1 - sx0) * mapViewZoom, (sy1 - sy0) * mapViewZoom
+          );
+        }
+      }
     }
-    // 之后的动态绘制回到逻辑像素坐标系
-    mapCtx.setTransform(mapCacheDpr, 0, 0, mapCacheDpr, 0, 0);
+    /* 之后的动态绘制回到"逻辑像素 + 缩放平移"坐标系：
+       设备像素 = dpr × (zoom × 地图坐标 + pan)。动态元素（终点 / 玩家 / 寻路路径 / 边框）
+       与静态层共用同一套坐标，所以放大后它们与地图内容严丝合缝地一起放大，
+       不会出现"图放大了、玩家标记还钉在原处"。
+       代价（如实记录、需真机确认观感）：玩家三角与路径线宽也会跟着放大，8× 下比 1× 粗一截。
+       若真机上看着别扭，正确做法是**在动态层自己除一个 zoom** 保持屏幕尺寸，
+       而不是改这里的坐标系（那会让标记与格子的相对位置漂移）。 */
+    mapCtx.setTransform(
+      mapViewDpr * mapViewZoom, 0, 0, mapViewDpr * mapViewZoom,
+      mapViewDpr * mapViewPanX, mapViewDpr * mapViewPanY
+    );
 
     /* ---------- 4) 动态元素 ---------- */
 
@@ -2016,13 +2090,70 @@
   /** 最大化地图的渲染目标（打开时创建、收起时置 null；null = 当前没有占着画布资源） */
   var mapFullTarget = null;
 
+  /* ------------------------------------------------------------
+   * 最大化地图的缩放 / 拖动平移（用户 2026-11-15 口径）
+   * ------------------------------------------------------------
+   * 只作用在最大化地图上：HUD 小地图的 mapViewZoom/Pan 恒为 1/0/0（见 drawMinimap 的
+   * viewZoomed 分支），所以"小地图保持现状"是结构性保证，不靠额外判断。
+   * 数学口径：屏幕(逻辑px) = 地图坐标 × zoom + pan，zoom ∈ [1, 8]。
+   * 为什么下限是 1（不做缩小）：① 用户口径写的就是 1×~8×；② 1× 时整张图刚好填满
+   * 内接正方形，再缩小只剩一圈黑边，没有信息增益。
+   * ---------------------------------------------------------- */
+  /** 最小 / 最大缩放倍数（用户口径 1×~8×） */
+  var MAP_FULL_MIN_ZOOM = 1;
+  var MAP_FULL_MAX_ZOOM = 8;
+  /**
+   * 离屏静态缓存的像素比上限（2）。
+   * ── 取舍（任务书要求给出实测数字，见 harness/perf-zoom-verify.js 的输出）──
+   * 缓存越大越清晰，但内存是它的平方：以 1080p 桌面（dpr=1、size≈1056）为例，
+   *   cacheDpr=1 → 1056²≈1.1M px ≈ 4.5MB
+   *   cacheDpr=2 → 2112²≈4.5M px ≈ 17.8MB（+13.3MB）
+   * 主画布另有 1056²×1.5²（dpr 上限 1.5）≈2.5M px ≈ 10MB，两者合计约 28MB 封顶。
+   * 为什么不按 dpr×zoom 无限提：8× 且 dpr=1.5 时需要 12×，16608² ≈ 276M px ≈ 1.1GB —— 直接爆。
+   * 所以在 2 处封顶，8× 时是"缓存像素被放大 6 倍"（dpr1.5×8/2），属刻意的清晰度/内存折中，
+   * 真机观感需人工确认（报告里如实标注）。
+   */
+  var MAP_FULL_CACHE_DPR_CAP = 2;
+  /**
+   * 提升缓存分辨率的门槛倍数。
+   * zoom < 2 时缓存与主画布同分辨率（内存与改造前**完全一致**，零回归）；
+   * zoom ≥ 2 才提到 min(2, dpr×zoom)。配合上限 2，实际只有两档（dpr 与 2），
+   * 于是"一次捏合 1×→8×"期间静态层最多重绘 1 次（跨过 2× 那一刻），
+   * 而不是每变一点倍数就重绘一次 121×121 的整层（那会让捏合直接卡住）。
+   */
+  var MAP_FULL_CACHE_TIER_ZOOM = 2;
+  /**
+   * 判定"这是拖动、不是点击"的位移阈值（逻辑 px）。
+   * 为什么需要它：点击地图本体 = 收起是既有口径，若不区分，
+   * "想拖动地图"的每一次松手都会把地图关掉，拖动就完全不可用。
+   * 取 6px：大于手指/鼠标的常见抖动（约 1~3px），又明显小于"有意拖动"。
+   */
+  var MAP_FULL_DRAG_SLOP = 6;
+
+  /** 当前缩放倍数（仅最大化地图；HUD 小地图不受影响） */
+  var mapFullZoom = 1;
+  /** 当前平移量（逻辑 px；屏幕 = 地图坐标×zoom + pan） */
+  var mapFullPanX = 0;
+  var mapFullPanY = 0;
+  /** 手势进行中的多指状态（null = 空闲；详见 bindMapFullGestures） */
+  var mapGesture = null;
+  /**
+   * 是否吞掉"下一次点击地图本体"的收起动作。
+   * 为什么需要：拖动 / 捏合松手后浏览器必定补发一次 click（触摸与鼠标都如此），
+   * 不挡掉就会"每拖一次地图就自己合上"。松手时置位，click 消费后或下一次
+   * pointerdown 时清除（不依赖 click 一定到达：手势被 pointercancel 打断也不会残留误判）。
+   */
+  var mapSuppressCloseClick = false;
+
+
   /** 收集最大化地图层的 DOM 引用（init() 已按 id 缓存过，这里只是收拢成一组方便传） */
   function mapFullRefs() {
     return {
       layer: el['map-full'],
       inner: el['map-full-inner'],
       canvas: el['map-full-canvas'],
-      closeBtn: el['btn-map-full-close']
+      closeBtn: el['btn-map-full-close'],
+      zoomBadge: el['map-full-zoom']
     };
   }
 
@@ -2069,6 +2200,8 @@
       ctx: canvas.getContext('2d'),
       size: 0,
       dpr: 1,
+      // 离屏静态缓存的像素比（可高于 dpr：放大时提清晰度用；由 applyMapFullCacheResolution 维护）
+      cacheDpr: 1,
       cacheCanvas: document.createElement('canvas'),
       cacheCtx: null,
       // 缓存失效状态：语义与文件头的 mapCache* 一致，只是挂到目标对象上（两套目标互不干扰）
@@ -2078,6 +2211,44 @@
     };
     t.cacheCtx = t.cacheCanvas.getContext('2d');
     return t;
+  }
+
+  /**
+   * 按 dpr 与当前倍数决定离屏静态缓存的像素比。
+   * 两档设计（见 MAP_FULL_CACHE_TIER_ZOOM 的说明），返回值恒 ≥ dpr：
+   *   zoom < 2  → dpr        （与主画布同分辨率，内存与改造前一致）
+   *   zoom ≥ 2  → min(2, dpr×zoom)
+   * @param {number} dpr 主画布像素比（已受 MAP_FULL_DPR_CAP 限制）
+   * @param {number} zoom 当前缩放倍数
+   * @returns {number} 缓存应使用的像素比
+   */
+  function mapFullCacheDprFor(dpr, zoom) {
+    if (!(zoom >= MAP_FULL_CACHE_TIER_ZOOM)) return dpr;
+    var want = dpr * zoom;
+    if (want > MAP_FULL_CACHE_DPR_CAP) want = MAP_FULL_CACHE_DPR_CAP;
+    return want > dpr ? want : dpr;
+  }
+
+  /**
+   * 把离屏缓存的画布尺寸 / 变换对齐到 t.size × t.cacheDpr；真的变了才重设并作废缓存。
+   * 为什么必须单独成一个函数：设置 canvas.width/height 会**清空画布并重置 2D 上下文状态**，
+   * 所以"分辨率没变就绝对不要碰它"，否则每次捏合都会白清一次 121×121 的静态层。
+   * @returns {boolean} 本次是否真的重建了缓存画布
+   */
+  function applyMapFullCacheResolution(t) {
+    if (!t || !t.cacheCanvas) return false;
+    var want = mapFullCacheDprFor(t.dpr, mapFullZoom);
+    t.cacheDpr = want;
+    var px = Math.round(t.size * want);
+    if (t.cacheCanvas.width === px && t.cacheCanvas.height === px) return false;
+    t.cacheCanvas.width = px;
+    t.cacheCanvas.height = px;
+    if (t.cacheCtx) t.cacheCtx.setTransform(want, 0, 0, want, 0, 0);
+    // 分辨率 / 尺寸变了：静态缓存内容作废（签名里虽含尺寸，这里是显式作废，不要省）
+    t.dirty = true;
+    t.signature = '';
+    t.exploredCount = -1;
+    return true;
   }
 
   /**
@@ -2092,24 +2263,24 @@
     // dpr 上限压到 1.5（M4）：1080p 下画布从 2128²≈4.5M 像素降到 1596²≈2.5M，主画布 + 缓存两份都省一半
     var dpr = Math.min(window.devicePixelRatio || 1, MAP_FULL_DPR_CAP);
     var t = mapFullTarget;
+    /* 规格（用户 2026-11-15）：resize 也把缩放 / 平移归零。
+       理由：窗口 / 转屏一变，"内接正方形"的边长就变了，原来的平移量按旧边长算，
+       留着会让画面偏到一角，玩家会以为地图画错了。openMapFull 是幂等的
+       （已开着时只调 resizeMapFull），所以"打开时重置"由这里一并覆盖。 */
+    resetMapFullView();
     if (t.size !== size || t.dpr !== dpr) {
       t.size = size;
       t.dpr = dpr;
-      /* 设置 width/height 会**重置 2D 上下文状态**（变换、样式），所以紧接着必须重设变换；
-         尺寸变了以后离屏缓存的像素也与新尺寸不匹配，必须一并重设，否则贴图会被拉伸 / 裁切。 */
+      /* 设置 width/height 会**重置 2D 上下文状态**（变换、样式），所以紧接着必须重设变换。
+         缓存画布不在这里处理：它还要看缩放倍数（cacheDpr），统一交给
+         applyMapFullCacheResolution()，避免两处各写一遍尺寸公式。 */
       if (t.canvas) {
         t.canvas.width = Math.round(size * dpr);
         t.canvas.height = Math.round(size * dpr);
       }
       if (t.ctx) t.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      t.cacheCanvas.width = Math.round(size * dpr);
-      t.cacheCanvas.height = Math.round(size * dpr);
-      if (t.cacheCtx) t.cacheCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      // 尺寸 / 像素比变了：静态缓存必然作废（签名里虽含尺寸，这里是显式作废，不要省）
-      t.dirty = true;
-      t.signature = '';
-      t.exploredCount = -1;
     }
+    applyMapFullCacheResolution(t);
     // 显示尺寸交给 CSS：canvas 内部是 size×dpr 像素，由 CSS 缩到 size 逻辑像素
     if (refs.inner) {
       refs.inner.style.width = size + 'px';
@@ -2118,25 +2289,155 @@
     return size;
   }
 
+  /** 把缩放 / 平移归零（1×、pan=0）并同步徽标；**不触发重绘**（时机由调用方决定） */
+  function resetMapFullView() {
+    mapFullZoom = MAP_FULL_MIN_ZOOM;
+    mapFullPanX = 0;
+    mapFullPanY = 0;
+    updateMapFullZoomBadge();
+  }
+
+  /**
+   * 把平移钳在地图范围内。屏幕 = 地图坐标×zoom + pan，地图在屏幕上的边长 = size×zoom（≥size），
+   * 要求地图始终**铺满**视口：pan ∈ [size×(1−zoom), 0]。
+   * zoom=1 时该区间退化成 [0,0] → 平移必然为 0：
+   * "1× 时平移归零"是数学结果，不是额外写的一条判断（少一处可能漏改的口径）。
+   * 为什么必须钳：不钳就能把地图拖出屏幕只剩空白，玩家会以为图丢了；缩放锚点在边界处
+   * 也需要一个确定的回弹行为。
+   */
+  function clampMapFullView() {
+    var size = mapFullTarget ? mapFullTarget.size : 0;
+    if (!size) return;
+    var minPan = size * (1 - mapFullZoom);
+    if (mapFullPanX > 0) mapFullPanX = 0;
+    if (mapFullPanX < minPan) mapFullPanX = minPan;
+    if (mapFullPanY > 0) mapFullPanY = 0;
+    if (mapFullPanY < minPan) mapFullPanY = minPan;
+  }
+
+  /** 倍数显示（口径 ④：角落显示当前倍数，如 2.4×；1× 时也显示 1.0×） */
+  function updateMapFullZoomBadge() {
+    var node = el['map-full-zoom'];
+    if (!node) return;
+    var txt = (Math.round(mapFullZoom * 10) / 10).toFixed(1) + '×';
+    if (node.textContent !== txt) node.textContent = txt;
+  }
+
+  /** 立刻用最近一次小地图参数重画一帧（缩放 / 平移是纯绘制变换，改完必须马上可见） */
+  function redrawMapFullNow() {
+    if (!mapFullOpen) return;
+    drawMapFullFromLastArgs();
+  }
+
+  /**
+   * 直接设定视图：钳制 → 同步徽标 → 按需重建缓存分辨率 → 立即重绘。
+   * 三个公开操作（setMapFullView / zoomMapFullAt / panMapFullBy）都收敛到这里，
+   * 保证"改视图"只有一条路径，不会出现"某处改了倍数但忘了重建缓存 / 忘了刷新徽标"。
+   * @param {number} zoom 目标倍数（钳到 1~8）
+   * @param {number} panX 目标平移（逻辑 px，钳到地图范围内）
+   * @param {number} panY
+   * @returns {Object} 生效后的 {zoom,panX,panY}
+   */
+  function setMapFullView(zoom, panX, panY) {
+    var z = Number(zoom);
+    if (!isFinite(z)) z = mapFullZoom;
+    if (z < MAP_FULL_MIN_ZOOM) z = MAP_FULL_MIN_ZOOM;
+    if (z > MAP_FULL_MAX_ZOOM) z = MAP_FULL_MAX_ZOOM;
+    mapFullZoom = z;
+    mapFullPanX = isFinite(panX) ? Number(panX) : 0;
+    mapFullPanY = isFinite(panY) ? Number(panY) : 0;
+    clampMapFullView();
+    updateMapFullZoomBadge();
+    // 倍数跨过 2× 时才真的重建缓存（内部用画布尺寸比对，没变就一个像素都不碰）
+    if (mapFullTarget) applyMapFullCacheResolution(mapFullTarget);
+    redrawMapFullNow();
+    return { zoom: mapFullZoom, panX: mapFullPanX, panY: mapFullPanY };
+  }
+
+  /**
+   * 以 (ax, ay) 为锚点缩放（逻辑 px，相对画布左上角）。
+   * 锚点不动的推导：锚点下的地图坐标 m = (a − pan)/z，缩放后仍在同一屏幕位置，即
+   *   a = m×z' + pan'  ⟹  pan' = a − (a − pan)×(z'/z)
+   * 若 z' 被钳到 1 / 8、或 pan 被 clampMapFullView 钳到边界，锚点会随之偏移 ——
+   * 这是"不许把地图拖出屏幕"的必然代价，也是主流地图应用的一致行为。
+   * @param {number} factor 倍数增量（>1 放大，<1 缩小），新倍数 = 当前 × factor
+   * @param {number} ax 锚点 x（逻辑 px）
+   * @param {number} ay 锚点 y（逻辑 px）
+   * @returns {Object} 生效后的 {zoom,panX,panY}
+   */
+  function zoomMapFullAt(factor, ax, ay) {
+    var f = Number(factor);
+    if (!isFinite(f) || f <= 0) return { zoom: mapFullZoom, panX: mapFullPanX, panY: mapFullPanY };
+    var z0 = mapFullZoom;
+    var z1 = z0 * f;
+    if (z1 < MAP_FULL_MIN_ZOOM) z1 = MAP_FULL_MIN_ZOOM;
+    if (z1 > MAP_FULL_MAX_ZOOM) z1 = MAP_FULL_MAX_ZOOM;
+    if (z1 === z0) return { zoom: mapFullZoom, panX: mapFullPanX, panY: mapFullPanY };
+    var ratio = z1 / z0;
+    /* 锚点缺失 / 非数值时退化为"以画布中心为锚点"，而不是让 NaN 顺着公式污染整个视图
+       （一次坏事件就让地图永久画不出来，是这类手势代码最典型的线上事故）。 */
+    var px = isFinite(ax) ? Number(ax) : mapSize / 2;
+    var py = isFinite(ay) ? Number(ay) : mapSize / 2;
+    return setMapFullView(z1, px - (px - mapFullPanX) * ratio, py - (py - mapFullPanY) * ratio);
+  }
+
+  /**
+   * 平移（逻辑 px；正数 = 内容往右下移动，与手指/鼠标同向）。
+   * @param {number} dx
+   * @param {number} dy
+   * @returns {Object} 生效后的 {zoom,panX,panY}
+   */
+  function panMapFullBy(dx, dy) {
+    var ddx = isFinite(dx) ? Number(dx) : 0;
+    var ddy = isFinite(dy) ? Number(dy) : 0;
+    if (ddx === 0 && ddy === 0) return { zoom: mapFullZoom, panX: mapFullPanX, panY: mapFullPanY };
+    return setMapFullView(mapFullZoom, mapFullPanX + ddx, mapFullPanY + ddy);
+  }
+
+  /**
+   * 只读快照（供测试 / 排错用）。**不要**拿它当写入口：改视图只有
+   * setMapFullView / zoomMapFullAt / panMapFullBy 三条路（都做了钳制与缓存维护）。
+   */
+  function getMapFullView() {
+    return {
+      open: mapFullOpen,
+      zoom: mapFullZoom,
+      panX: mapFullPanX,
+      panY: mapFullPanY,
+      size: mapFullTarget ? mapFullTarget.size : 0,
+      dpr: mapFullTarget ? mapFullTarget.dpr : 0,
+      cacheDpr: mapFullTarget ? mapFullTarget.cacheDpr : 0,
+      cacheW: (mapFullTarget && mapFullTarget.cacheCanvas) ? mapFullTarget.cacheCanvas.width : 0
+    };
+  }
+
   /**
    * 在"最大化目标"上执行 fn：把模块级渲染目标临时切到 t，画完立刻还原。
    * 为什么可以这么做：HUD 小地图与最大化地图**不会同时绘制** ——
    * 两者都由 main.js 的同一个 120ms 节流串行调用，切换期间不存在并发。
-   * 必须成对处理的 9 个变量：画布 / 上下文 / 逻辑尺寸 / dpr / 离屏缓存 / 其上下文 /
-   * 脏标记 / 签名 / 探索计数。
+   * 必须成对处理的 13 个变量：画布 / 上下文 / 逻辑尺寸 / 缓存 dpr / 主画布 dpr /
+   * 缩放 / 平移 x / 平移 y / 离屏缓存 / 其上下文 / 脏标记 / 签名 / 探索计数。
    * minimapResizePending 也要换掉：否则 drawMinimap 会走"量 HUD 容器"的 resize 分支，
    * 把最大化画布按 HUD 尺寸改掉 —— 最大化尺寸只由 resizeMapFull() 全权负责。
    */
   function withMapFullTarget(t, fn) {
     var save = {
-      ctx: mapCtx, size: mapSize, dpr: mapCacheDpr,
+      ctx: mapCtx, size: mapSize, dpr: mapCacheDpr, viewDpr: mapViewDpr,
+      zoom: mapViewZoom, panX: mapViewPanX, panY: mapViewPanY,
       cacheCanvas: mapCacheCanvas, cacheCtx: mapCacheCtx,
       dirty: mapCacheDirty, signature: mapCacheSignature,
       exploredCount: mapCacheExploredCount, resizePending: minimapResizePending
     };
     mapCtx = t.ctx;
     mapSize = t.size;
-    mapCacheDpr = t.dpr;
+    mapCacheDpr = t.cacheDpr || t.dpr;
+    mapViewDpr = t.dpr;
+    /* 缩放 / 平移在这里"注入"渲染目标：手势状态是模块级的 mapFullZoom/Pan，
+       只有最大化目标才把它装进绘制变换。HUD 绘制时 mapViewZoom 恒为 1、pan 恒为 0，
+       所以 HUD 那条分支与改造前逐像素一致。 */
+    mapViewZoom = mapFullZoom;
+    mapViewPanX = mapFullPanX;
+    mapViewPanY = mapFullPanY;
     mapCacheCanvas = t.cacheCanvas;
     mapCacheCtx = t.cacheCtx;
     mapCacheDirty = t.dirty;
@@ -2153,6 +2454,10 @@
       mapCtx = save.ctx;
       mapSize = save.size;
       mapCacheDpr = save.dpr;
+      mapViewDpr = save.viewDpr;
+      mapViewZoom = save.zoom;
+      mapViewPanX = save.panX;
+      mapViewPanY = save.panY;
       mapCacheCanvas = save.cacheCanvas;
       mapCacheCtx = save.cacheCtx;
       mapCacheDirty = save.dirty;
@@ -2212,6 +2517,10 @@
     mapFullTarget = createMapFullTarget(refs.canvas);
     mapFullOpen = true;                  // 先置状态再显示 DOM：resizeMapFull / draw 都读这个标记
     refs.layer.classList.remove('hidden');
+    /* 口径 ⑥：换关 / 重新打开一律从 1× 开始。
+       resizeMapFull() 里也会重置一次（它要处理"已开着时窗口 resize"的情形），
+       这里显式再写一次是为了让"打开 = 1×"在本函数里就近可读、不依赖下游函数的副作用。 */
+    resetMapFullView();
     resizeMapFull();
     exitPointerLockForMap();
     // 立刻用最近一次小地图参数补画一帧（同一局内才画），避免"打开瞬间空白"的闪烁
@@ -2240,6 +2549,11 @@
     }
     // 按交付口径：收起时缩回并作废相关缓存，避免常驻内存 / 残留上一局的旧签名
     resetMinimapCache();
+    /* 口径 ⑥：收起后缩放 / 平移必须归零（下次打开是 1× 的整图）。
+       同时清掉进行中的手势：ESC / V 可以在手指按着的瞬间收起地图，
+       残留的指针状态会让"下次打开"的第一下拖动从一个莫名其妙的基准开始。 */
+    resetMapFullView();
+    mapGesture = null;
     return true;
   }
 
@@ -2286,16 +2600,22 @@
     });
   }
 
-  /** 绑定最大化地图层的点击（幂等；地图本体与关闭按钮各一次） */
+  /** 绑定最大化地图层的交互（幂等：点击收起 + 关闭按钮 + 缩放 / 拖动平移手势） */
   function bindMapFull() {
     if (bindMapFull.done) return;
     bindMapFull.done = true;
     var refs = mapFullRefs();
     if (refs.inner) {
       /* 点地图本体 = 收起（用户口径：再点地图关、点留白不关）。
-         "点留白不关"在 CSS 层就决定了：容器 pointer-events:none，留白的事件落不到这里。 */
+         "点留白不关"在 CSS 层就决定了：容器 pointer-events:none，留白的事件落不到这里。
+         ⚠ 2026-11-15 起必须与拖动区分：拖动 / 捏合松手时浏览器会补发一次 click，
+           不挡掉的话"每拖一次地图就自己关上"，拖动功能等于不可用。 */
       refs.inner.addEventListener('click', function (e) {
         if (e.target === refs.closeBtn) return;   // 关闭按钮自己处理，避免同一次点击走两遍
+        if (mapSuppressCloseClick) {               // 本次手势是拖动 / 捏合：消费掉这次合成 click
+          mapSuppressCloseClick = false;
+          return;
+        }
         playClick();
         closeMapFull();
       });
@@ -2308,6 +2628,206 @@
         closeMapFull();
       });
     }
+    bindMapFullGestures(refs);
+  }
+
+  /**
+   * 缩放 / 拖动平移的 PointerEvent 手势（口径 ②③）。
+   *
+   * 为什么用 PointerEvent 而不是 touch* + mouse*：
+   *   ① 一套代码同时覆盖触摸、鼠标、触控笔（Chrome 109 全支持 PointerEvent）；
+   *   ② 多指天然用 pointerId 区分，不需要维护 touches 列表；
+   *   ③ 与既有 input.js 的 touch 管理**互不干扰**：本层在地图方块上，
+   *      事件目标不是 #look-layer，那边绑在 look-layer 上的 touchstart/move
+   *      收不到（兄弟节点不冒泡），所以不会出现"拖地图顺带转视角"。
+   * 为什么绑在这一个元素上就够：#map-full-inner 是地图方块本身（pointer-events:auto），
+   * 方块之外是穿透区（pointer-events:none），口径 ⑦"点留白不关、还能滑视角"完全不受影响。
+   *
+   * 手势语义：
+   *   · 1 指 / 鼠标左键拖动 → 平移（与手指同向）；
+   *   · ≥2 指 → 捏合缩放（两指间距比例 → 倍数；锚点 = 两指中点）＋ 中点位移 → 平移；
+   *   · 位移超过 MAP_FULL_DRAG_SLOP 或发生过捏合 → 松手后的合成 click 不关地图。
+   *
+   * @param {Object} refs mapFullRefs() 的结果
+   */
+  function bindMapFullGestures(refs) {
+    var inner = refs.inner;
+    if (!inner || !inner.addEventListener) return;
+
+    /** 事件坐标 → 画布逻辑坐标（左上角原点，单位 = 逻辑 px） */
+    function localPoint(evt) {
+      var size = mapFullTarget ? mapFullTarget.size : 0;
+      var rect = null;
+      try {
+        rect = (refs.canvas && refs.canvas.getBoundingClientRect) ? refs.canvas.getBoundingClientRect() : null;
+      } catch (e) { rect = null; }
+      /* 有布局信息就按真实矩形归一化（canvas 的 CSS 尺寸与逻辑尺寸 size 一致）。
+         取不到布局（无头环境 rect 全 0）时退化为"事件坐标即逻辑坐标"：
+         只影响锚点/阈值的精度，不影响功能正确性，也绝不让手势抛异常。 */
+      if (rect && rect.width > 0 && rect.height > 0 && size > 0) {
+        return {
+          x: (evt.clientX - rect.left) / rect.width * size,
+          y: (evt.clientY - rect.top) / rect.height * size
+        };
+      }
+      return { x: Number(evt.clientX) || 0, y: Number(evt.clientY) || 0 };
+    }
+
+    /** 取出参与捏合的前两根手指（对象里整数键按数值升序枚举，等价于"最早按下的两根"） */
+    function firstTwoPoints(g) {
+      var out = [];
+      for (var id in g.points) {
+        if (!Object.prototype.hasOwnProperty.call(g.points, id)) continue;
+        out.push(g.points[id]);
+        if (out.length === 2) break;
+      }
+      return out;
+    }
+
+    /** 用当前两指位置刷新捏合基准（新手指按下 / 双指变单指时都要调，否则倍率会跳） */
+    function refreshPinchBase(g) {
+      var pts = firstTwoPoints(g);
+      if (pts.length < 2) { g.lastDist = 0; return; }
+      var dx = pts[1].x - pts[0].x;
+      var dy = pts[1].y - pts[0].y;
+      g.lastDist = Math.sqrt(dx * dx + dy * dy);
+      g.lastCx = (pts[0].x + pts[1].x) / 2;
+      g.lastCy = (pts[0].y + pts[1].y) / 2;
+    }
+
+    function onDown(evt) {
+      if (!mapFullOpen) return;
+      // 鼠标只认左键：右键 / 中键不参与平移（右键另有 contextmenu 被全局屏蔽）
+      if (evt.pointerType === 'mouse' && evt.button !== 0) return;
+      if (!mapGesture) {
+        mapGesture = {
+          points: {}, count: 0,
+          lastX: 0, lastY: 0, startX: 0, startY: 0,
+          lastDist: 0, lastCx: 0, lastCy: 0, moved: false
+        };
+      }
+      var g = mapGesture;
+      var p = localPoint(evt);
+      var pid = (evt.pointerId === undefined || evt.pointerId === null) ? 'p' + g.count : evt.pointerId;
+      if (!g.points[pid]) { g.points[pid] = { x: p.x, y: p.y }; g.count++; }
+      else { g.points[pid].x = p.x; g.points[pid].y = p.y; }
+      if (g.count === 1) {
+        // 新手势开始：清掉上一次的"拖动过"标记，否则一次拖动之后的第一次真点击会被吞掉
+        g.moved = false;
+        mapSuppressCloseClick = false;
+        g.lastX = g.startX = p.x;
+        g.lastY = g.startY = p.y;
+        g.lastDist = 0;
+      } else {
+        g.moved = true;            // 双指一定不是"点击地图收起"
+        refreshPinchBase(g);
+      }
+      /* 指针捕获：手指/鼠标滑出地图方块后仍能收到 move / up。
+         否则拖到边缘就会"断线"，松手时收不到 up，手势状态永远卡住。
+         无头环境 / 老内核没有这个 API 时静默跳过（不影响基本拖拽）。 */
+      try { if (inner.setPointerCapture) inner.setPointerCapture(evt.pointerId); } catch (e) { /* 忽略 */ }
+      if (evt.cancelable) evt.preventDefault();
+    }
+
+    function onMove(evt) {
+      var g = mapGesture;
+      if (!g) return;
+      var pid = (evt.pointerId === undefined || evt.pointerId === null) ? null : evt.pointerId;
+      var slot = null;
+      if (pid !== null && g.points[pid]) slot = g.points[pid];
+      else {
+        // 没有 pointerId 的桩事件（老内核 / 测试）：单指时按"唯一的那根"处理
+        var pts = firstTwoPoints(g);
+        if (pts.length === 1) slot = pts[0];
+      }
+      if (!slot) return;
+      var p = localPoint(evt);
+      slot.x = p.x;
+      slot.y = p.y;
+
+      if (g.count >= 2) {
+        /* ---------- 双指：捏合缩放 + 中点平移（合成一次 setMapFullView，只重绘一次） ---------- */
+        var two = firstTwoPoints(g);
+        if (two.length < 2) return;
+        var ddx = two[1].x - two[0].x;
+        var ddy = two[1].y - two[0].y;
+        var d = Math.sqrt(ddx * ddx + ddy * ddy);
+        var cx = (two[0].x + two[1].x) / 2;
+        var cy = (two[0].y + two[1].y) / 2;
+        if (g.lastDist > 0 && d > 0) {
+          var z0 = mapFullZoom;
+          var z1 = z0 * (d / g.lastDist);
+          if (z1 < MAP_FULL_MIN_ZOOM) z1 = MAP_FULL_MIN_ZOOM;
+          if (z1 > MAP_FULL_MAX_ZOOM) z1 = MAP_FULL_MAX_ZOOM;
+          var ratio = z1 / z0;
+          /* 先按中点位移平移、再以**新中点**为锚点缩放，两步合成一个 pan 值：
+             这样一次事件只重绘一次（分开调 pan/zoom 会白重绘一次）。
+             锚点公式与 zoomMapFullAt 完全一致：pan' = a − (a − pan)×ratio。 */
+          var panAfterMoveX = mapFullPanX + (cx - g.lastCx);
+          var panAfterMoveY = mapFullPanY + (cy - g.lastCy);
+          setMapFullView(
+            z1,
+            cx - (cx - panAfterMoveX) * ratio,
+            cy - (cy - panAfterMoveY) * ratio
+          );
+        }
+        g.lastDist = d;
+        g.lastCx = cx;
+        g.lastCy = cy;
+        g.moved = true;
+        if (evt.cancelable) evt.preventDefault();
+        return;
+      }
+
+      /* ---------- 单指 / 鼠标左键：拖动平移 ---------- */
+      var dx = p.x - g.lastX;
+      var dy = p.y - g.lastY;
+      g.lastX = p.x;
+      g.lastY = p.y;
+      /* 用"相对手势起点的累计位移"判拖动，而不是本次事件的增量：
+         真实设备上一次 move 的增量往往只有 1~3px，拿它跟 6px 阈值比会永远判不出拖动。 */
+      var movedX = p.x - g.startX;
+      var movedY = p.y - g.startY;
+      if (!g.moved && (movedX * movedX + movedY * movedY) > (MAP_FULL_DRAG_SLOP * MAP_FULL_DRAG_SLOP)) {
+        g.moved = true;
+      }
+      if (dx !== 0 || dy !== 0) panMapFullBy(dx, dy);
+      if (evt.cancelable) evt.preventDefault();
+    }
+
+    function endPointer(evt) {
+      var g = mapGesture;
+      if (!g) return;
+      var pid = (evt.pointerId === undefined || evt.pointerId === null) ? null : evt.pointerId;
+      if (pid !== null && g.points[pid]) {
+        delete g.points[pid];
+        g.count--;
+      } else {
+        // 无 id 的桩事件：整只指针抬起（单指情形）
+        g.points = {};
+        g.count = 0;
+      }
+      try { if (inner.releasePointerCapture) inner.releasePointerCapture(evt.pointerId); } catch (e) { /* 忽略 */ }
+      if (g.count <= 0) {
+        g.count = 0;
+        // 拖动 / 捏合过 → 让紧随其后的合成 click 不关地图（flag 在下一次 pointerdown 时清）
+        if (g.moved) mapSuppressCloseClick = true;
+        mapGesture = null;
+        return;
+      }
+      /* 双指变单指：把剩下的那根手指的基准重置到它**当前**位置，
+         否则下一帧会按"从上一根手指的位置"算出一个巨大的 delta，画面猛跳一下。 */
+      g.lastDist = 0;
+      refreshPinchBase(g);
+      var pts = firstTwoPoints(g);
+      if (pts.length === 1) { g.lastX = pts[0].x; g.lastY = pts[0].y; }
+      g.moved = true;
+    }
+
+    inner.addEventListener('pointerdown', onDown);
+    inner.addEventListener('pointermove', onMove);
+    inner.addEventListener('pointerup', endPointer);
+    inner.addEventListener('pointercancel', endPointer);
   }
 
   /* ------------------------------------------------------------
@@ -2623,6 +3143,14 @@
     isMapFullOpen: isMapFullOpen,
     resizeMapFull: resizeMapFull,
     drawMinimapFull: drawMinimapFull,
+    /* 缩放 / 拖动平移（2026-11-15，只作用于最大化地图）：
+       get 是只读快照；set / zoomAt / panBy 是三个**唯一**的写入口（内部统一钳制、
+       维护缓存分辨率、刷新倍数徽标、立即重绘）。手势代码与测试都走它们，
+       避免"某一处改了倍数却忘了配套动作"。 */
+    getMapFullView: getMapFullView,
+    setMapFullView: setMapFullView,
+    zoomMapFullAt: zoomMapFullAt,
+    panMapFullBy: panMapFullBy,
     refreshRanking: refreshRanking,
     openRanking: openRanking,
     openAchievements: openAchievements,

@@ -548,6 +548,8 @@
     // 限制像素比
     applyPixelRatio();
     Game.renderer.setSize(w, h, false);
+    /* 最大化地图（M2/M3）：尺寸取 min(vw,vh) 的内接正方形，窗口/转屏后必须重算并重设画布分辨率 */
+    if (MG.UI && MG.UI.resizeMapFull) MG.UI.resizeMapFull();
     /* BUG-066：setSize 会把画布内容重设（不同实现下可能被清空），而菜单态默认不再逐帧渲染，
        所以这里必须显式要求一次重画，否则"在菜单里转屏/拉窗口"会留下黑画布或拉伸的旧画面。 */
     markSceneDirty();
@@ -676,6 +678,9 @@
   function buildLevel(seed) {
     var settings = MG.Settings.get();
     var diff = Game.diff;
+    /* 换关时先收起"最大化地图"（M2/M3 的生命周期钩子）：否则它会浮在新关卡上，
+       而且它内部缓存的还是上一局的迷宫对象。 */
+    if (MG.UI && MG.UI.closeMapFull) MG.UI.closeMapFull();
 
     // 沙盒测试局（js/dev.js）：换一份"无金币 / 无天花板"的难度副本。
     // 逐项判方法存在：旧副本 / 半截 dev.js（副本漂移）缺一个方法就会抛 TypeError，
@@ -1288,6 +1293,8 @@
     }
     Game.state = 'menu';
     if (Game.input) Game.input.exitPointerLock();
+    // 最大化地图（M2/M3）：回主菜单前收起，避免它浮在菜单上
+    if (MG.UI && MG.UI.closeMapFull) MG.UI.closeMapFull();
     disposeLevel();
     // 清空关卡遗留的雾效与背景，避免旧关卡雾色透出到菜单（背景还原为当前主题 sky 色）
     if (Game.scene) {
@@ -1316,6 +1323,8 @@
   function onVictory() {
     if (Game.state === 'win') return;
     Game.state = 'win';
+    // 最大化地图（M2/M3）：进胜利界面前收起（结算面板 z-40 本来就盖得住，但不留悬挂状态）
+    if (MG.UI && MG.UI.closeMapFull) MG.UI.closeMapFull();
     /* BUG-066：通关后画面静止（win 态不推进 3D 动画），主循环不再逐帧渲染；
        补一次脏标记，让胜利界面背后那张画面停在"刚抵达终点"的准确一帧。 */
     markSceneDirty();
@@ -1440,6 +1449,8 @@
   function startReplay() {
     if (!MG.Replay || !Game.maze) return;
     clearAchieveToastTimer();
+    // 最大化地图（M2/M3）：进回放前收起（回放有自己的控制条与视角）
+    if (MG.UI && MG.UI.closeMapFull) MG.UI.closeMapFull();
     var frames = MG.Replay.load(Game.diffKey, Game.seed);
     if (!frames || frames.length < 2) {
       MG.UI.toast('没有可用的回放数据');
@@ -1819,6 +1830,11 @@
       if (lastMapDraw >= 0.12) {
         lastMapDraw = 0;
         if (Game.mapFound) MG.UI.drawMinimap(Game.player, Game.maze, Game.mazeView, settings);
+        /* 最大化地图（M2/M3）共用同一份节流：ui.js 不开自己的定时器。
+           未打开时它是空操作；开着时不重绘就会是一张静止的图（玩家走动看不出变化）。 */
+        if (MG.UI && MG.UI.drawMinimapFull) {
+          MG.UI.drawMinimapFull(Game.player, Game.maze, Game.mazeView, settings);
+        }
       }
     } else if (Game.state === 'paused' || Game.state === 'win') {
       // 暂停/胜利时仍渲染静态画面（可看到身后场景）
@@ -2136,6 +2152,10 @@
     Game.input.onPause = function () {
       // 签到面板开启时：ESC / P 先关面板（与道具面板、设置面板一致的手感）
       if (MG.Checkin && MG.Checkin.isPanelOpen && MG.Checkin.isPanelOpen()) { MG.Checkin.closePanel(); return; }
+      /* 最大化地图（M2/M3）开着时：ESC / P 先收起它，**不暂停**（用户要求：最大化期间不暂停）。
+         顺序按设计文档：签到 → 全屏地图 → 道具面板 → 设置 → 回放 → 暂停/继续。
+         注意它必须在下面"暂停/继续"之前，否则 ESC 会直接把对局暂停掉、地图还浮在上面。 */
+      if (MG.UI && MG.UI.isMapFullOpen && MG.UI.isMapFullOpen()) { MG.UI.closeMapFull(); return; }
       // 道具面板开启时：ESC / P 键优先关闭面板（不弹暂停菜单、不恢复）
       if (Game.itemPanelOpen) { closeItemPanel(); return; }
       // 设置面板开启时：优先关闭它。否则 ESC 会走进下面的 resumeGame() 分支，
@@ -2172,6 +2192,12 @@
       var v = !MG.Settings.get().minimap;
       MG.Settings.set('minimap', v);
       MG.UI.toast(v ? '小地图：开' : '小地图：关');
+    };
+    /* 地图最大化（M2/M3）：**新增键 V** 切换最大化/收起。
+       M 键保持"小地图开/关"语义不变（onToggleMinimap 一字未动）——
+       这是用户 2026-11-09 明确的口径；键位也是他建议的 V。 */
+    Game.input.onToggleMapFull = function () {
+      if (MG.UI && MG.UI.toggleMapFull) MG.UI.toggleMapFull();
     };
     Game.input.onToggleItems = function () {
       // F 键：开合道具面板（新语义，替代旧的 F = 自动寻路）

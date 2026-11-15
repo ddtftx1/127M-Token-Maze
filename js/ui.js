@@ -26,28 +26,44 @@
    * 画好后整张贴到主画布，每帧只重绘动态元素（玩家 / 终点呼吸光 / 寻路路径 / 边框）。
    *
    * 缓存什么时候失效（不是"只画一次"）：
-   *   a) 难度 / 主题 / 色盲 / 金币显示设置 / 剩余金币数 变化（签名比对）；
-   *   b) 玩家跨格，或探索标记数量变化。
-   * 困难难度 31×31 = 961 格 × 2 次遍历，原先每 120ms 全量重扫一遍。
-   * 注：b) 里的"玩家跨格"这条其实比"探索区域变化"更宽 —— 走过已探索的格子也会置脏，
-   * 所以行走时仍会有全量重扫（约每秒 2~3 次），只是不再随 120ms 的绘制节奏跑。
+   *   a) 难度 / 主题 / 色盲 / 金币显示设置 / 剩余金币数 / **已探索格子数**变化（签名比对）；
+   *   b) 尺寸变化（resizeMinimap 里作废）、解锁状态变化（updateMinimapLock 里作废）、
+   *      重新开局（resetMinimapCache）。
+   *
+   * ── 2026-11-15 收窄重绘条件（性能，实测见交付说明）──
+   * 原条件里还有一条"**玩家跨格**"（pgd.x/y !== mapCacheCellX/Y）。它是多余的：
+   * 静态层只画 maze.grid + player.explored + mazeView.coins + maze.start ——
+   * **玩家位置与朝向完全画在动态层**（drawMinimap 的后半段三角标记），
+   * 所以跨格那次整层重绘没有改变任何一个像素，纯属白干。
+   * 代价可不小：121×121 全探索时静态重绘一次约 8ms（低端手机会放大数倍），
+   * 而 2 米/格的迷宫里玩家几乎每 0.5 秒就跨一格 —— 复杂难度下这不是小钱。
+   * 去掉之后，"新探索到格子"仍会立刻出现在地图上：
+   * 探索必然让 explored 的已标记数 +1，而该计数（连同解锁状态）就在下面的签名里，
+   * 签名一变即置脏 —— 正确性由"计数单调递增"这一前提保证（player.js 只写 1、不写回 0；
+   * 换关卡会新建 Uint8Array 并在 main.js 的 buildLevel 里调 resetMinimapCache）。
+   *
+   * 注：保留"签名比对 + 显式 invalidate"两条通路，而不是只留其中一条 ——
+   * 签名覆盖"内容相关的变化"，invalidate 覆盖"内容无关但缓存必须作废"的时机（尺寸 / 锁 / 换局）。
    */
   var mapCacheCanvas = null;
   var mapCacheCtx = null;
   var mapCacheDpr = 1;
   /** 缓存有效性标记：置 false 后下一次 drawMinimap 会重绘缓存 */
   var mapCacheDirty = true;
-  /** 上次重绘缓存时的玩家格子坐标 */
-  var mapCacheCellX = -1;
-  var mapCacheCellY = -1;
-  /** 上次重绘缓存时的探索标记数量（变化说明新区域被探索） */
+  /** 上次重绘缓存时的探索标记数量（变化说明新区域被探索 —— 静态层唯一的"内容变化"来源） */
   var mapCacheExploredCount = -1;
-  /** 上次重绘缓存时的静态内容签名（难度/主题/色盲/金币设置变化时失效） */
+  /** 上次重绘缓存时的静态内容签名（难度/主题/色盲/金币设置/剩余金币/探索计数/解锁状态） */
   var mapCacheSignature = '';
   /** 窗口尺寸/横竖屏变化后是否欠一次小地图分辨率重算（容器隐藏时先挂起，绘制时补算） */
   var minimapResizePending = false;
   /** resize 防抖定时器 id（0 = 无待执行任务） */
   var minimapResizeTimer = 0;
+  /**
+   * 最近一次成功调用的 drawMinimap 参数（player / maze / mazeView / settings）。
+   * 用途：打开最大化地图时立刻补画一帧，避免"打开后到下个 120ms 节流之间"闪一下空白。
+   * 只在**同一局**内使用（调用方做对象身份校验），换关卡后即使残留也画不出来。
+   */
+  var lastMapArgs = null;
 
   /** 强制小地图缓存在下一次绘制时重绘（主题 / 色盲 / 金币设置 / 重新开局时调用） */
   function invalidateMinimapCache() {
@@ -134,12 +150,12 @@
 
   /**
    * 重置小地图缓存状态（每局开始时调用）
-   * 清空"上次格坐标 / 探索计数 / 签名"，避免上一局的统计与签名让新一局误判为"缓存有效"
+   * 清空"探索计数 / 签名"，避免上一局的统计与签名让新一局误判为"缓存有效"。
+   * 注：2026-11-15 起不再有"上次玩家格坐标"这两个字段 —— 跨格不再触发静态重绘，
+   * 玩家标记在动态层，见文件上方 mapCacheCanvas 的完整说明。
    */
   function resetMinimapCache() {
     mapCacheDirty = true;
-    mapCacheCellX = -1;
-    mapCacheCellY = -1;
     mapCacheExploredCount = -1;
     mapCacheSignature = '';
   }
@@ -199,6 +215,8 @@
       'hud', 'stat-time', 'stat-steps', 'stat-diff', 'stat-dist', 'stat-dist-wrap', 'stat-coins', 'stat-wallet',
       'btn-minimap', 'btn-fullscreen', 'btn-settings-hud', 'btn-pause',
       'compass-arrow', 'compass-dist', 'minimap', 'minimap-lock', 'minimap-lock-hint',
+      // 最大化地图（M2/M3）：与 #hud 平级的独立层 + 小地图外框（点它 = 打开最大化）
+      'minimap-wrap', 'map-full', 'map-full-inner', 'map-full-canvas', 'btn-map-full-close',
       'joystick', 'joystick-knob', 'btn-items', 'btn-cancel-path', 'toast',
       'pause-menu', 'btn-resume', 'btn-restart', 'btn-settings-pause', 'btn-menu',
       'settings-panel', 'set-fov', 'val-fov', 'set-sensitivity', 'val-sensitivity',
@@ -260,8 +278,22 @@
     clockEl = { t: 0 };
 
     bindSettingsPanel();
+    /* 设置变更的统一兜底：小地图被关掉（含"重置设置"把它关掉）时，最大化地图必须跟着收起 ——
+       否则屏幕上会留一层不刷新、也说不清来源的深色方块。
+       用订阅而不是写进 bindSwitch：HUD 的 M 按钮、开发者面板、重置路径都会改这一项，
+       只挂在下拉/开关的 change 事件上必漏（这正是"新增入口忘记接"的老坑，参 BUG-056/064）。 */
+    if (S && S.onSettingChange) {
+      S.onSettingChange(function (evt) {
+        if (!evt) return;
+        if (evt.key !== 'minimap' && !evt.reset) return;
+        var st = evt.settings || (S.get ? S.get() : null);
+        if (!st || !st.minimap) closeMapFull();
+      });
+    }
     bindMainMenu();
     bindHudButtons();
+    // 最大化地图层的点击绑定（幂等；openMapFull 里也会兜一次，防止 DOM 后补）
+    bindMapFull();
     bindPauseMenu();
     bindWinScreen();
     bindRankingScreen();
@@ -596,6 +628,19 @@
       el['btn-fullscreen'].addEventListener('click', function () {
         playClick();
         toggleFullscreen();
+      });
+    }
+    /* 点小地图本体 → 最大化（设计 M2 的入口）。
+       绑在 .minimap-wrap 上而不是 #minimap：未解锁时占位层 #minimap-lock 盖在画布上
+       （它自己 pointer-events:none），绑 wrap 才能把整块区域都接住，
+       再由 canOpenMapFull() 判定"未解锁不响应"（不泄露终点 / 距离，BUG-022）。
+       CSS 侧必须给 .minimap-wrap 开 pointer-events:auto，否则 #hud 的 none 会继承下来、
+       连 click 都收不到 —— 两处是一对，改一处记得看另一处。 */
+    if (el['minimap-wrap']) {
+      el['minimap-wrap'].addEventListener('click', function () {
+        if (!canOpenMapFull()) return;   // 未解锁 / 小地图已关掉 / 不在局内 → 入口不响应
+        playClick();
+        openMapFull();
       });
     }
     if (el['btn-settings-hud']) {
@@ -1808,23 +1853,29 @@
     var size = maze.size;
     var cellPx = mapSize / size;
 
+    /* 记下本次绘制参数：最大化地图在"打开的那一刻"（还没等到下一次 120ms 节流）需要它补画一帧，
+       否则会先闪一下空白。只在同一局内使用 —— 见 drawMapFullFromLastArgs() 的对象身份校验。 */
+    lastMapArgs = { player: player, maze: maze, mazeView: mazeView, settings: settings };
+
     /* ---------- 1) 缓存失效判定 ---------- */
     var pgd = player.getGrid();
     var exploredCount = countExplored(player.explored, size * size);
-    /* 静态内容签名：难度（size）/ 主题配色 / 色盲模式 / 金币显示设置 / 剩余金币数
-       任一变化都要重绘缓存。剩余金币数必须算进来：金币是画在离屏静态层上的，
-       而"道具面板生成金币"这类操作可以在玩家**不跨格**的情况下改变金币集合 ——
-       只靠下面的跨格/探索计数判定，小地图要等走到下一格才显示新金币。 */
+    /* 静态内容签名：难度（size）/ 主题配色 / 色盲模式 / 金币显示设置 / 剩余金币数 /
+       已探索格子数 / 小地图解锁状态 —— 只有这些变化才该让整层静态缓存作废。
+       两条"必须有"的理由：
+       ① 剩余金币数：金币画在离屏静态层上，而"道具面板生成金币"这类操作可以在玩家**不跨格**
+          时改变金币集合，不把它算进来就得等走到下一格才显示新金币（BUG-042② 的既有口径）；
+       ② 已探索格子数：这是静态层唯一"内容会变"的来源 —— 新格子一被探索计数就变，
+          签名随之改变 → 立刻重绘（交付脚本断言过"走到新格子后静态层确实重绘"）。
+       这里**刻意没有**玩家格坐标：玩家三角画在动态层，跨格不改变静态层任何一个像素，
+       把它留在条件里只会让行走时白做整层重绘（实测与说明见文件头 mapCacheCanvas 注释）。 */
     var remainCoins = (typeof mazeView.remainCoins === 'function') ? mazeView.remainCoins() : 0;
+    var mapFoundFlag = (MG.game && MG.game.mapFound) ? 1 : 0;
     var signature = size + '|' + (settings.theme || '') + '|' + (cb ? 1 : 0) + '|' +
-      (settings.minimapCoins ? 1 : 0) + '|' + mapSize + '|' + remainCoins;
+      (settings.minimapCoins ? 1 : 0) + '|' + mapSize + '|' + remainCoins + '|' +
+      exploredCount + '|' + mapFoundFlag;
     if (signature !== mapCacheSignature) {
       mapCacheSignature = signature;
-      mapCacheDirty = true;
-    }
-    // 玩家跨格移动 或 探索标记数量变化 → 缓存需要重绘
-    if (pgd.x !== mapCacheCellX || pgd.y !== mapCacheCellY ||
-        exploredCount !== mapCacheExploredCount) {
       mapCacheDirty = true;
     }
 
@@ -1832,8 +1883,7 @@
     if (mapCacheDirty || !mapCacheCanvas) {
       drawMinimapStatic(player, maze, mazeView, settings);
       mapCacheDirty = false;
-      mapCacheCellX = pgd.x;
-      mapCacheCellY = pgd.y;
+      // 仅作观测 / 排错用途；失效判定已经并入上面的签名，这里不参与判断（别误当条件用）
       mapCacheExploredCount = exploredCount;
     }
 
@@ -1872,7 +1922,7 @@
       mapCtx.fill();
     }
 
-    // 玩家（三角，指示朝向）—— 复用上面缓存失效判定时已算出的当前格
+    // 玩家（三角，指示朝向）—— 复用上面动态层算出的当前格（静态层不画玩家，所以跨格只重绘这里）
     var px = pgd.x * cellPx + cellPx / 2;
     var py = pgd.y * cellPx + cellPx / 2;
     mapCtx.save();
@@ -1929,6 +1979,331 @@
     mapCtx.strokeStyle = 'rgba(120,190,255,0.35)';
     mapCtx.lineWidth = 2;
     mapCtx.strokeRect(1, 1, mapSize - 2, mapSize - 2);
+  }
+
+  /* ------------------------------------------------------------
+   * 最大化地图（M2/M3，2026-11-15）
+   * ------------------------------------------------------------
+   * 设计依据：《新难度-地图可读性设计.md》§4 的 M2（交互 / 层级 / 非模态 / 生命周期）、
+   * M3（逐条冲突清单）、M4（性能与内存）、M5（验收）。
+   *
+   * 三条不可动摇的口径（用户 2026-11-09 定稿）：
+   *   ① 正方形之外的留白**不关闭地图**，而是穿透到 #look-layer 继续滑视角
+   *      → 容器 pointer-events:none，只有地图本体与关闭按钮 auto；
+   *        关闭只能靠 再点地图 / V / ESC / 专用关闭按钮；
+   *   ② `M` 键保持"小地图开/关"语义不变，最大化是**新增的 V 键**（键位接线在 main.js）；
+   *   ③ 最大化期间**不暂停**：不置 state='paused'、不动计时、不动输入状态，
+   *      摇杆与道具面板照常可用（层级上 #hud 20 / 摇杆 22、.screen 40 都在本层之上）。
+   *
+   * ── 为什么绘制复用 drawMinimap，而不是再写一套 ──
+   * 附 2 的改动面表写明：另起一套绘制 / 缓存会让 BUG-042② 的"签名失效链路"漏掉一处
+   * （金币数 / 主题 / 色盲 / 尺寸任一变化都会有一边不刷新）。所以最大化只换
+   * "主画布 + 离屏缓存 + 逻辑尺寸 + dpr"这四样，绘制函数仍是同一个
+   * drawMinimapStatic / drawMinimap：用 withMapFullTarget() 把模块级目标变量临时切过去，
+   * 画完立刻换回来。好处是两边永远同一套失效逻辑；代价是这里必须**严格成对**地保存 / 还原
+   * （用 try/finally 保证，中途抛异常也不会把 HUD 的目标状态搞脏）。
+   * ---------------------------------------------------------- */
+
+  /** 最大化态的 dpr 上限（设计 M4 采纳 Q12 的 ②：1.5× 在这个尺寸下已足够锐利，内存约省一半） */
+  var MAP_FULL_DPR_CAP = 1.5;
+  /** 最大化地图距视口边缘的留白（12px + 安全区），与设计 M2 的公式一致 */
+  var MAP_FULL_MARGIN = 12;
+  /** 正方形边长下限：极窄视口 / 无布局环境下兜底，避免算出 0 或负数 */
+  var MAP_FULL_MIN_SIZE = 120;
+
+  /** 最大化地图是否处于打开状态（画面的唯一判据；DOM 的 hidden 只是它的投影） */
+  var mapFullOpen = false;
+  /** 最大化地图的渲染目标（打开时创建、收起时置 null；null = 当前没有占着画布资源） */
+  var mapFullTarget = null;
+
+  /** 收集最大化地图层的 DOM 引用（init() 已按 id 缓存过，这里只是收拢成一组方便传） */
+  function mapFullRefs() {
+    return {
+      layer: el['map-full'],
+      inner: el['map-full-inner'],
+      canvas: el['map-full-canvas'],
+      closeBtn: el['btn-map-full-close']
+    };
+  }
+
+  /** 最大化地图当前是否开着（供 main.js 的 ESC 链 / 生命周期钩子判定） */
+  function isMapFullOpen() { return mapFullOpen; }
+
+  /**
+   * 读一个安全区变量。--safe-* 由 CSS 定义为 env(safe-area-inset-*, 0px)，
+   * Chrome 109 在计算值阶段会把它求值成 px；取值失败（老内核 / 无布局环境）按 0 处理 ——
+   * 桌面与绝大多数手机本来就是 0，不会因为读不到而算错。
+   */
+  function readSafeInset(name) {
+    var v = '';
+    try { v = window.getComputedStyle(document.body).getPropertyValue(name); } catch (e) { v = ''; }
+    var px = parseCssPx(v);
+    return px > 0 ? px : 0;
+  }
+
+  /**
+   * 计算最大化正方形的边长（px）。
+   * 设计口径：`size = min(100vw, 100vh) − 2×(12px + 安全区)`。
+   * 这里按"横 / 纵分别扣各自的安全区"展开，更严谨且与一般式等价：
+   *   可用宽 = vw − 2×(12 + max(safe-l, safe-r))
+   *   可用高 = vh − 2×(12 + max(safe-t, safe-b))
+   *   取两者较小值 → 内接正方形；安全区为 0 时就是 min(vw, vh) − 24（与文档一致）。
+   * 正方形之外的留白是**预期现象**（用户已确认可接受），也是留白穿透滑视角的作用区。
+   */
+  function computeMapFullSize() {
+    var vw = window.innerWidth || 0;
+    var vh = window.innerHeight || 0;
+    var insetH = Math.max(readSafeInset('--safe-l'), readSafeInset('--safe-r'));
+    var insetV = Math.max(readSafeInset('--safe-t'), readSafeInset('--safe-b'));
+    var availW = vw - 2 * (MAP_FULL_MARGIN + insetH);
+    var availV = vh - 2 * (MAP_FULL_MARGIN + insetV);
+    var size = Math.min(availW, availV);
+    if (!isFinite(size) || size <= MAP_FULL_MARGIN) size = MAP_FULL_MIN_SIZE;
+    return Math.max(MAP_FULL_MIN_SIZE, Math.round(size));
+  }
+
+  /** 新建最大化渲染目标：主画布 + 同尺寸的离屏静态缓存（结构与 HUD 小地图完全一样） */
+  function createMapFullTarget(canvas) {
+    var t = {
+      canvas: canvas,
+      ctx: canvas.getContext('2d'),
+      size: 0,
+      dpr: 1,
+      cacheCanvas: document.createElement('canvas'),
+      cacheCtx: null,
+      // 缓存失效状态：语义与文件头的 mapCache* 一致，只是挂到目标对象上（两套目标互不干扰）
+      dirty: true,
+      signature: '',
+      exploredCount: -1
+    };
+    t.cacheCtx = t.cacheCanvas.getContext('2d');
+    return t;
+  }
+
+  /**
+   * 按当前视口重算最大化地图的尺寸与 dpr，并重设画布（含离屏缓存）。
+   * main.js 在 resize / orientationchange 时调用；直接再调一次 openMapFull() 也可以（幂等）。
+   * @returns {number} 本次使用的逻辑边长（px）；当前没有目标时返回 0
+   */
+  function resizeMapFull() {
+    if (!mapFullTarget) return 0;
+    var refs = mapFullRefs();
+    var size = computeMapFullSize();
+    // dpr 上限压到 1.5（M4）：1080p 下画布从 2128²≈4.5M 像素降到 1596²≈2.5M，主画布 + 缓存两份都省一半
+    var dpr = Math.min(window.devicePixelRatio || 1, MAP_FULL_DPR_CAP);
+    var t = mapFullTarget;
+    if (t.size !== size || t.dpr !== dpr) {
+      t.size = size;
+      t.dpr = dpr;
+      /* 设置 width/height 会**重置 2D 上下文状态**（变换、样式），所以紧接着必须重设变换；
+         尺寸变了以后离屏缓存的像素也与新尺寸不匹配，必须一并重设，否则贴图会被拉伸 / 裁切。 */
+      if (t.canvas) {
+        t.canvas.width = Math.round(size * dpr);
+        t.canvas.height = Math.round(size * dpr);
+      }
+      if (t.ctx) t.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      t.cacheCanvas.width = Math.round(size * dpr);
+      t.cacheCanvas.height = Math.round(size * dpr);
+      if (t.cacheCtx) t.cacheCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      // 尺寸 / 像素比变了：静态缓存必然作废（签名里虽含尺寸，这里是显式作废，不要省）
+      t.dirty = true;
+      t.signature = '';
+      t.exploredCount = -1;
+    }
+    // 显示尺寸交给 CSS：canvas 内部是 size×dpr 像素，由 CSS 缩到 size 逻辑像素
+    if (refs.inner) {
+      refs.inner.style.width = size + 'px';
+      refs.inner.style.height = size + 'px';
+    }
+    return size;
+  }
+
+  /**
+   * 在"最大化目标"上执行 fn：把模块级渲染目标临时切到 t，画完立刻还原。
+   * 为什么可以这么做：HUD 小地图与最大化地图**不会同时绘制** ——
+   * 两者都由 main.js 的同一个 120ms 节流串行调用，切换期间不存在并发。
+   * 必须成对处理的 9 个变量：画布 / 上下文 / 逻辑尺寸 / dpr / 离屏缓存 / 其上下文 /
+   * 脏标记 / 签名 / 探索计数。
+   * minimapResizePending 也要换掉：否则 drawMinimap 会走"量 HUD 容器"的 resize 分支，
+   * 把最大化画布按 HUD 尺寸改掉 —— 最大化尺寸只由 resizeMapFull() 全权负责。
+   */
+  function withMapFullTarget(t, fn) {
+    var save = {
+      ctx: mapCtx, size: mapSize, dpr: mapCacheDpr,
+      cacheCanvas: mapCacheCanvas, cacheCtx: mapCacheCtx,
+      dirty: mapCacheDirty, signature: mapCacheSignature,
+      exploredCount: mapCacheExploredCount, resizePending: minimapResizePending
+    };
+    mapCtx = t.ctx;
+    mapSize = t.size;
+    mapCacheDpr = t.dpr;
+    mapCacheCanvas = t.cacheCanvas;
+    mapCacheCtx = t.cacheCtx;
+    mapCacheDirty = t.dirty;
+    mapCacheSignature = t.signature;
+    mapCacheExploredCount = t.exploredCount;
+    minimapResizePending = false;
+    try {
+      fn();
+    } finally {
+      // 先把目标里的最新缓存状态收回去，再还原 HUD —— 顺序不能反（反了会把 HUD 状态写进目标）
+      t.dirty = mapCacheDirty;
+      t.signature = mapCacheSignature;
+      t.exploredCount = mapCacheExploredCount;
+      mapCtx = save.ctx;
+      mapSize = save.size;
+      mapCacheDpr = save.dpr;
+      mapCacheCanvas = save.cacheCanvas;
+      mapCacheCtx = save.cacheCtx;
+      mapCacheDirty = save.dirty;
+      mapCacheSignature = save.signature;
+      mapCacheExploredCount = save.exploredCount;
+      minimapResizePending = save.resizePending;
+    }
+  }
+
+  /**
+   * 当前是否允许最大化（入口判据）。三条一起卡：
+   *   ① 必须在"局内"（playing / paused）：菜单 / 加载 / 结算 / 回放没有可绘制的地图，
+   *      而且设计 M3 要求进这些状态时自动收起（main.js 的钩子），入口这里再兜一层；
+   *   ② 已解锁小地图（mapFound）：未拾取地图卷轴前不允许最大化 ——
+   *      不能靠最大化绕过解锁，否则会泄露终点与剩余距离（BUG-022 的既有口径）；
+   *   ③ 玩家自己没把小地图关掉：与 #btn-minimap 的开关语义保持一致。
+   */
+  function canOpenMapFull() {
+    var g = MG.game;
+    if (!g) return false;
+    if (g.state !== 'playing' && g.state !== 'paused') return false;
+    if (!g.mapFound) return false;
+    if (S && S.get && !S.get().minimap) return false;
+    return true;
+  }
+
+  /** 退出指针锁定：光标被锁时点不到地图与关闭按钮（与道具面板同款处理，BUG-019 一族） */
+  function exitPointerLockForMap() {
+    try {
+      // ui.js 不反向依赖 main.js：只走 Game.input 这个既有出口；拿不到时退回标准 DOM API
+      if (MG.game && MG.game.input && MG.game.input.exitPointerLock) {
+        MG.game.input.exitPointerLock();
+        return;
+      }
+      if (document.exitPointerLock) document.exitPointerLock();
+    } catch (e) { /* 忽略：iOS 等没有 Pointer Lock 的环境本来就没有锁定态 */ }
+  }
+
+  /**
+   * 打开最大化地图。**幂等**：已经打开时只重算尺寸并返回 true
+   *（resize / orientationchange 钩子可以直接再调一次，不必先判断状态）。
+   * @returns {boolean} 调用后是否处于打开状态
+   */
+  function openMapFull() {
+    if (mapFullOpen) {
+      resizeMapFull();
+      return true;
+    }
+    if (!canOpenMapFull()) return false;
+    bindMapFull();                       // 幂等（内部 done 标记）；也覆盖 init 时元素尚未就绪的极端情况
+    var refs = mapFullRefs();
+    if (!refs.layer || !refs.canvas) return false;  // DOM 缺失：宁可不开，也不留一个点不到的层
+    mapFullTarget = createMapFullTarget(refs.canvas);
+    mapFullOpen = true;                  // 先置状态再显示 DOM：resizeMapFull / draw 都读这个标记
+    refs.layer.classList.remove('hidden');
+    resizeMapFull();
+    exitPointerLockForMap();
+    // 立刻用最近一次小地图参数补画一帧（同一局内才画），避免"打开瞬间空白"的闪烁
+    drawMapFullFromLastArgs();
+    return true;
+  }
+
+  /**
+   * 收起最大化地图（幂等）。**不碰 state / 计时 / 输入** —— 这是"非模态"的核心：
+   * 收起只做三件事：隐藏层、释放画布、作废缓存。
+   * @returns {boolean} 调用后是否处于关闭状态（恒 true，便于调用方链式判断）
+   */
+  function closeMapFull() {
+    if (!mapFullOpen && !mapFullTarget) return true;
+    var refs = mapFullRefs();
+    if (refs.layer) refs.layer.classList.add('hidden');
+    mapFullOpen = false;
+    /* 释放最大化画布：把 width/height 归零，浏览器的后备存储随之释放（M4 的内存口径）；
+       缓存画布同样归零 —— 只丢引用的话，部分内核里后备存储可能在 GC 之前一直占着。 */
+    if (mapFullTarget) {
+      try {
+        if (mapFullTarget.canvas) { mapFullTarget.canvas.width = 0; mapFullTarget.canvas.height = 0; }
+        if (mapFullTarget.cacheCanvas) { mapFullTarget.cacheCanvas.width = 0; mapFullTarget.cacheCanvas.height = 0; }
+      } catch (e) { /* 忽略：归零失败不影响收起 */ }
+      mapFullTarget = null;
+    }
+    // 按交付口径：收起时缩回并作废相关缓存，避免常驻内存 / 残留上一局的旧签名
+    resetMinimapCache();
+    return true;
+  }
+
+  /** 开合切换 @returns {boolean} 切换后的打开状态（true = 现在开着） */
+  function toggleMapFull() {
+    if (mapFullOpen) {
+      closeMapFull();
+      return false;
+    }
+    openMapFull();
+    return mapFullOpen;
+  }
+
+  /** 用最近一次 drawMinimap 的参数补画一帧（只在同一局内；原因见 lastMapArgs 的说明） */
+  function drawMapFullFromLastArgs() {
+    if (!mapFullOpen || !lastMapArgs || !MG.game) return;
+    /* 对象身份校验：buildLevel 会重建 maze 与 player。不做这个判断的话，
+       "上一局的地图参数"会在新一局打开最大化的瞬间被画出来 —— 比空白更糟（画的是错的迷宫）。 */
+    if (MG.game.maze !== lastMapArgs.maze || MG.game.player !== lastMapArgs.player) return;
+    drawMinimapFull(lastMapArgs.player, lastMapArgs.maze, lastMapArgs.mazeView, lastMapArgs.settings);
+  }
+
+  /**
+   * 绘制最大化地图（由 main.js 在既有的 120ms 小地图节流里调用；**ui.js 不开新定时器**）。
+   * 未打开时是空操作，所以调用方不必先判断 isMapFullOpen()。
+   * @param {Object} player 玩家（提供 getGrid / explored / yaw / autoPath）
+   * @param {Object} maze 迷宫（size / grid / start / end）
+   * @param {Object} mazeView 迷宫视图（coins / remainCoins）
+   * @param {Object} settings 当前设置（minimap / theme / colorblind / minimapCoins）
+   */
+  function drawMinimapFull(player, maze, mazeView, settings) {
+    if (!mapFullOpen || !mapFullTarget) return;
+    /* 防御：小地图被关掉 / 掉回未解锁态时自己收起 ——
+       否则会留一个"永远不刷新"的深色方块盖在画面上。
+       （正常路径下 main.js 的钩子会先收起，这里只是兜底，两者不冲突） */
+    if (!settings || !settings.minimap || (MG.game && !MG.game.mapFound)) {
+      closeMapFull();
+      return;
+    }
+    if (!player || !maze || !mapFullTarget.size) return;
+    var t = mapFullTarget;
+    withMapFullTarget(t, function () {
+      drawMinimap(player, maze, mazeView, settings);
+    });
+  }
+
+  /** 绑定最大化地图层的点击（幂等；地图本体与关闭按钮各一次） */
+  function bindMapFull() {
+    if (bindMapFull.done) return;
+    bindMapFull.done = true;
+    var refs = mapFullRefs();
+    if (refs.inner) {
+      /* 点地图本体 = 收起（用户口径：再点地图关、点留白不关）。
+         "点留白不关"在 CSS 层就决定了：容器 pointer-events:none，留白的事件落不到这里。 */
+      refs.inner.addEventListener('click', function (e) {
+        if (e.target === refs.closeBtn) return;   // 关闭按钮自己处理，避免同一次点击走两遍
+        playClick();
+        closeMapFull();
+      });
+    }
+    if (refs.closeBtn) {
+      refs.closeBtn.addEventListener('click', function (e) {
+        // 阻止冒泡到 .map-full-inner，否则同一次点击会再触发一次"点地图收起"（重复音效）
+        if (e.stopPropagation) e.stopPropagation();
+        playClick();
+        closeMapFull();
+      });
+    }
   }
 
   /* ------------------------------------------------------------
@@ -2235,6 +2610,15 @@
     // 小地图锁定 / 排行榜 / 回放
     updateMinimapLock: updateMinimapLock,
     resetMinimapCache: resetMinimapCache,
+    // 最大化地图（M2/M3，2026-11-15）—— 生命周期由 main.js 接线：
+    //   ESC 链最前面 closeMapFull；buildLevel/backToMenu/onVictory/startReplay 自动收起；
+    //   resize/orientationchange 调 resizeMapFull；120ms 节流里调 drawMinimapFull。
+    openMapFull: openMapFull,
+    closeMapFull: closeMapFull,
+    toggleMapFull: toggleMapFull,
+    isMapFullOpen: isMapFullOpen,
+    resizeMapFull: resizeMapFull,
+    drawMinimapFull: drawMinimapFull,
     refreshRanking: refreshRanking,
     openRanking: openRanking,
     openAchievements: openAchievements,

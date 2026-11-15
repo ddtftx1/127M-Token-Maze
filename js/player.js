@@ -612,7 +612,20 @@
     if (g.x === this._lastDistGridX && g.y === this._lastDistGridY) {
       return this._lastDistValue;
     }
-    var d = MG.Path.gridDistance(this.maze, g, this.maze.end);
+    /* 2026-11-15 性能优化：改走**缓存的终点距离场**（O(1) 查询）。
+       旧实现每次都用 gridDistance() 从零跑整张图 BFS —— 121×121 实测 3~10ms/次，
+       而 HUD 每 100ms 取一次距离、玩家在 2 米/格的迷宫里几乎每 0.5 秒跨一格，
+       合起来就是"巨型迷宫里每跨一格卡一下"。距离场由 main.js 在 loading 阶段预热
+       （见 buildLevel），整局只算一次；万一取不到（版本漂移）则回退旧的 gridDistance。 */
+    var d;
+    if (MG.Path.endDistance && MG.Path.fieldPath) {
+      var size = this.maze.size;
+      var field = MG.Path.endDistance(this.maze, this.maze.end);
+      d = field[g.y * size + g.x];
+      if (typeof d !== 'number') d = -1;
+    } else {
+      d = MG.Path.gridDistance(this.maze, g, this.maze.end);
+    }
     this._lastDistGridX = g.x;
     this._lastDistGridY = g.y;
     this._lastDistValue = d;

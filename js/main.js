@@ -730,6 +730,11 @@
       }
     }
 
+    /* 预热终点距离场（2026-11-15 性能优化）：HUD 的"距离"每 100ms 查一次、
+       小地图与指南针也都要它，把这一整次 BFS 放在 loading 阶段算完，
+       玩家进局后每次查询都是 O(1)，不会"每跨一格卡一下"。 */
+    if (MG.Path && MG.Path.endDistance) MG.Path.endDistance(maze, maze.end);
+
     Game.maze = maze;
     MG.UI.setLoadingProgress(0.5, '构建 3D 场景…');
 
@@ -973,9 +978,14 @@
     }
 
     // 计算路径（最佳路径 = 顺路收集版本；最快路径 = 纯最短路径）
+    /* "最快路径"改走**终点距离场的梯度下降**（algorithm='field'）：
+       等价于 A* 的最短路径（BFS 距离场上每步都能精确下降 1），但复杂度只有 O(路径长度)——
+       121×121 实测 0.2~0.6ms vs A* 的 11~22ms，省掉堆操作与节点分配。
+       findWorldPath 内部在 field 失败时会自动回退 A*，所以这里不需要额外兜底。
+       "最佳路径"仍用 A*（要绕去捡金币，是多目标问题，距离场不适用）。 */
     var path = (kind === 'best')
       ? buildBestPath(player)
-      : MG.Path.findWorldPath(Game.maze, player.pos, MG.Maze.CELL, 'astar');
+      : MG.Path.findWorldPath(Game.maze, player.pos, MG.Maze.CELL, 'field');
     if (!path || path.length < 2) {
       MG.UI.toast('未找到通往终点的路径');
       if (MG.Audio) MG.Audio.error();

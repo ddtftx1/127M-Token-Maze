@@ -2163,9 +2163,13 @@
   }
 
   /**
-   * 当前是否允许最大化（入口判据）。三条一起卡：
-   *   ① 必须在"局内"（playing / paused）：菜单 / 加载 / 结算 / 回放没有可绘制的地图，
-   *      而且设计 M3 要求进这些状态时自动收起（main.js 的钩子），入口这里再兜一层；
+   * 当前是否允许**打开**最大化地图（入口判据）。三条一起卡：
+   *   ① 必须在 playing 态：paused / win / replay / menu / loading 都可能已经被 .screen 盖满
+   *      （暂停菜单、胜利界面、回放条），此时打开地图玩家根本看不到它，
+   *      却会吃掉一次 ESC / V（"按了没反应"的观感）。而"最大化期间被暂停"是允许的
+   *      （道具面板会 pause）—— 那属于**已经开着**的情况，不受本判据约束，
+   *      收起走 closeMapFull / toggleMapFull，它们只看 mapFullOpen。
+   *      设计 M3 也要求进 win / replay 等状态时自动收起（main.js 的钩子），这里再兜一层；
    *   ② 已解锁小地图（mapFound）：未拾取地图卷轴前不允许最大化 ——
    *      不能靠最大化绕过解锁，否则会泄露终点与剩余距离（BUG-022 的既有口径）；
    *   ③ 玩家自己没把小地图关掉：与 #btn-minimap 的开关语义保持一致。
@@ -2173,7 +2177,7 @@
   function canOpenMapFull() {
     var g = MG.game;
     if (!g) return false;
-    if (g.state !== 'playing' && g.state !== 'paused') return false;
+    if (g.state !== 'playing') return false;
     if (!g.mapFound) return false;
     if (S && S.get && !S.get().minimap) return false;
     return true;

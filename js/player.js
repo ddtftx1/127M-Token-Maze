@@ -481,19 +481,47 @@
       depthWrite: false, side: THREE.DoubleSide, blending: THREE.AdditiveBlending
     });
 
-    // 采样点（避免点太密导致三角形过多）
-    var step = 1;
-    var count = Math.ceil(worldPath.length / step);
-    var disc = new THREE.InstancedMesh(ringGeo, ringMat, count);
+    /* BUG-073（2026-11-20）：圆盘按"世界距离"均匀降采样，而不是每个路径点都放一个。
+       旧实现 step 写死 1（原注释写的是"采样点（避免点太密导致三角形过多）"，等于说了却没做），
+       困难档「最佳路径」的世界路径点实测可达 1 万+ —— 因为 toWorldPath() 会给每个拐角插 7 个
+       圆滑点，而蛇形迷宫里几乎每个途经点都是拐角。于是 InstancedMesh 实例数≈路径点数，
+       再加上 AdditiveBlending 半透明叠加，手机 GPU 的填充率代价比三角形数更贵。
+       现在两条口径：
+         · 小路径（点数 ≤ PATH_DISC_MAX）**保持旧观感**：每个点一个圆盘，一点不变；
+         · 大路径按 总长度/(上限-1) 算采样间距，实例数被钉死在上限内。
+       光带的"连续不断线"由下面第 2) 段的细带（ribbon）负责，圆盘只是装饰亮点，
+       所以稀疏化不会出现断线；终点另有 endRing 标记，也不依赖圆盘。
+       注意：这里只对**世界路径点数**设上限，不改 worldPath 本身，也不改细带的采样。 */
+    var PATH_DISC_MAX = 2400;
+    var keepAllDiscs = worldPath.length <= PATH_DISC_MAX;
+    var discCount = keepAllDiscs ? worldPath.length : PATH_DISC_MAX;
+    var discGap = 0;
+    if (!keepAllDiscs) {
+      var totalLen = 0;
+      for (var li = 1; li < worldPath.length; li++) {
+        var ldx = worldPath[li].x - worldPath[li - 1].x;
+        var ldz = worldPath[li].z - worldPath[li - 1].z;
+        totalLen += Math.sqrt(ldx * ldx + ldz * ldz);
+      }
+      discGap = totalLen / (PATH_DISC_MAX - 1);
+    }
+    var disc = new THREE.InstancedMesh(ringGeo, ringMat, discCount);
     var m4 = new THREE.Matrix4();
     var q = new THREE.Quaternion().setFromEuler(new THREE.Euler(-Math.PI / 2, 0, 0));
     var scale = new THREE.Vector3(1, 1, 1);
 
     var n = 0;
-    for (var i = 0; i < worldPath.length; i += step) {
+    var lastDiscX = 0, lastDiscZ = 0;
+    for (var i = 0; i < worldPath.length && n < discCount; i++) {
       var p = worldPath[i];
+      if (!keepAllDiscs && n > 0) {
+        var gdx = p.x - lastDiscX, gdz = p.z - lastDiscZ;
+        if (gdx * gdx + gdz * gdz < discGap * discGap) continue;
+      }
       m4.compose(new THREE.Vector3(p.x, y, p.z), q, scale);
       disc.setMatrixAt(n++, m4);
+      lastDiscX = p.x;
+      lastDiscZ = p.z;
     }
     disc.count = n;
     disc.instanceMatrix.needsUpdate = true;

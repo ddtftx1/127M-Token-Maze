@@ -1507,6 +1507,12 @@
     if (Game.player) Game.player.syncCamera();
     // 恢复雾效
     applyFog(Game.scene, MG.Settings.get());
+    /* BUG-072（2026-11-20）：这里必须补一次脏标记。
+       上面把 state 改成了 'win'，而 isSceneCovered() 把 win 判为"被全屏层盖住、可跳过渲染"；
+       回放期间又是每帧都在渲染（_sceneDirty 一直是 false），于是 syncCamera() 与 applyFog()
+       这两处改动**一帧都画不出来** —— 画布上留着的是回放第三人称视角（相机在幽灵身后 5 米、高 4.5 米）。
+       按 renderScene 上方那条规矩，这属于"在覆盖状态下改变了 3D 画面"的第 6 条路径，必须跟着置脏。 */
+    markSceneDirty();
   }
 
   function toggleReplayPause() {

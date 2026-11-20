@@ -3115,6 +3115,12 @@
     closeSettings: closeSettings,
     isSettingsOpen: isSettingsOpen,
     isOverlayOpen: isOverlayOpen,
+    /* BUG-071（2026-11-20）：设置面板控件回写。
+       main.js 的 onSettingChanged() 在「性能模式」把 quality/shadows 级联改成 low/关之后，
+       靠它把面板上的画质下拉与阴影开关同步成生效值；此前这里漏了导出，
+       main.js 里 `if (MG.UI.syncSettingsUI)` 的守卫永远短路（不报错、什么也不发生），
+       表现为"面板里一开性能模式，画质仍显示高、阴影仍显示开"。 */
+    syncSettingsUI: syncSettingsUI,
     showWin: showWin,
     updateHud: updateHud,
     drawMinimap: drawMinimap,
